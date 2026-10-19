@@ -1,0 +1,9 @@
+{
+  "image": "synthetic-bilingual.png",
+  "text": "தமிழ் மொழி\nபெயர் : மாதிரி\nEnglish sample\n0123456789\n000000000001",
+  "numeric_fields": [
+    "0123456789",
+    "000000000001"
+  ],
+  "kind": "synthetic printed; not handwriting"
+}
