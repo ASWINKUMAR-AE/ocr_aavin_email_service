@@ -1,9 +1,10 @@
-param([string]$Python = 'py')
+param([string]$Python = 'py', [switch]$Development)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 if ($Python -eq 'py') { & py -3.12 -m venv .venv } else { & $Python -m venv .venv }
 if ($LASTEXITCODE -ne 0) { throw 'Install 64-bit Python 3.12, or supply -Python with its executable path.' }
-& .\.venv\Scripts\python.exe -m pip install -r backend/requirements-lock.txt
+$requirementsFile = if ($Development) { 'backend/requirements-dev.txt' } else { 'backend/requirements.txt' }
+& .\.venv\Scripts\python.exe -m pip install -r $requirementsFile
 if ($LASTEXITCODE -ne 0) { throw 'Backend installation failed.' }
 Push-Location frontend
 try { & npm.cmd ci; if ($LASTEXITCODE -ne 0) { throw 'Frontend installation failed.' } } finally { Pop-Location }

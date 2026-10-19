@@ -1,3 +1,5 @@
+# Keep retained package versions identical to the verified runtime.
+-c requirements-lock.txt
 fastapi==0.115.12
 uvicorn==0.34.2
 python-multipart==0.0.20
@@ -8,5 +10,7 @@ opencv-contrib-python==4.10.0.84
 pypdfium2==4.30.0
 openpyxl==3.1.5
 paddleocr==3.3.2
-paddlex[ocr]==3.3.10
+# PaddleOCR's official detection/recognition extra. The broader [ocr] extra
+# installs unused document-parser/VLM utilities (SciPy, sklearn, tokenizers...).
+paddlex[ocr-core]==3.3.10
 paddlepaddle==3.2.2

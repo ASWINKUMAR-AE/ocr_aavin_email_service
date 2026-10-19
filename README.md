@@ -28,7 +28,7 @@ From `D:\ocr`, with Python 3.12 available to `py`:
 
 ```powershell
 py -3.12 -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r backend\requirements-lock.txt
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements.txt
 Set-Location frontend
 npm.cmd ci
 Set-Location ..
@@ -81,6 +81,7 @@ Suggestions use long image rules and a populated numeric column as a row anchor.
 ## Checks
 
 ```powershell
+.\.venv\Scripts\python.exe -m pip install -r backend\requirements-dev.txt
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe scripts\cache_models.py --verify-only
 .\.venv\Scripts\python.exe scripts\verify_ocr.py
@@ -91,7 +92,23 @@ npm.cmd run build
 
 API unit tests use a clearly isolated test recognizer to check storage, upload errors, job completion, corrections and exports. `verify_ocr.py` uses the **actual installed PaddleOCR** and cached models, asserts Tamil and English are present, and writes `data/smoke-result.json`. It inspects the actual constructor and `predict` API. It does not compare a mocked result to itself.
 
-`backend/requirements-lock.txt` captures the complete tested Python dependency set; `requirements.txt` and `requirements-dev.txt` are the direct dependency inputs. `frontend/package-lock.json` locks frontend dependencies.
+`backend/requirements-lock.txt` pins the runtime dependency set. `requirements.txt` selects PaddleX's official `ocr-core` extra, sufficient for this app's existing detection/recognition pipeline. The broader `ocr` extra adds document-parser/VLM dependencies unused here. `requirements-dev.txt` adds test tools, constrained by `requirements-dev-lock.txt`. The installer accepts `-Development` to include these tools. `frontend/package-lock.json` locks frontend dependencies.
+
+Installing a smaller requirements file with ordinary `pip install` does not uninstall old packages. Use a clean environment for deployment, or an exact environment sync with the appropriate lockfile. Do not delete packages manually from `site-packages`. Retained package/model versions, OCR settings and application code are unchanged by this reduction.
+
+`.vercelignore` files exclude local caches, private data and test fixtures from deployment uploads, including when Vercel's Root Directory is `backend/`. Tests and fixtures remain in the repository. These exclusions and the reduced requirements do not make the local SQLite/background-worker architecture serverless-ready, and do not guarantee a bundle below 500 MB.
+
+See [DEPENDENCY_REDUCTION.md](DEPENDENCY_REDUCTION.md) for measured sizes, exact-output comparisons and timing results.
+
+To compare two installed environments without writing recognized text to a report:
+
+```powershell
+# Run with the original environment first, then the candidate environment.
+.\.venv\Scripts\python.exe scripts\profile_runtime.py --output .cache\baseline.json
+.\candidate\Scripts\python.exe scripts\profile_runtime.py --output .cache\candidate.json --compare .cache\baseline.json
+```
+
+Use identical `--images` arguments in both runs to add private test images. The profiler compares hashes of input files, model files, exact OCR results (including confidence and coordinates) and table output; it reports three warmed inference timings per sample. It measures installed package files on the current platform, not the Vercel/Linux deployment bundle. Timings vary with CPU load and thermal state.
 
 ## Benchmark your handwriting
 

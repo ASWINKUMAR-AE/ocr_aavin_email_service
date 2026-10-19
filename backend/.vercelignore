@@ -1,0 +1,10 @@
+# Applies when Vercel's Root Directory is backend/.
+.venv/
+.cache/
+.pytest_cache/
+tests/
+**/__pycache__/
+**/*.pyc
+.env
+.env.*
+data/

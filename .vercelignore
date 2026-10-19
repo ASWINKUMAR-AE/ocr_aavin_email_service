@@ -1,0 +1,20 @@
+# Local environments, downloaded packages and private runtime data.
+.venv/
+.tools/
+.python/
+.cache/
+.pytest_cache/
+pytest-cache-files-*/
+.git/
+.aws/
+.codex/
+.agents/
+.env
+.env.*
+data/
+**/__pycache__/
+**/*.pyc
+# Verification fixtures are kept in Git, but are not needed by the API.
+backend/tests/
+frontend/src/*.test.jsx
+frontend/src/test-setup.js
