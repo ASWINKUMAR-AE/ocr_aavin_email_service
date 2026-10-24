@@ -135,22 +135,49 @@ def export_table(identifier: str, page_index: int, format: str, metadata: bool =
         content, mime = output.getvalue().encode('utf-8-sig'), 'text/csv; charset=utf-8'
     elif format == 'xlsx':
         from openpyxl import Workbook
-        from openpyxl.styles import Alignment, Font, PatternFill
+        from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
         from openpyxl.utils import get_column_letter
         book = Workbook()
         sheet = book.active
         sheet.title = f'Page {page_index + 1}'
-        for row in [headers] + rows:
+        thin_border = Border(
+            left=Side(style='thin', color='D0D7DE'),
+            right=Side(style='thin', color='D0D7DE'),
+            top=Side(style='thin', color='D0D7DE'),
+            bottom=Side(style='thin', color='D0D7DE')
+        )
+        total_fill = PatternFill('solid', fgColor='F0FDF4')
+        total_font = Font(name='Segoe UI', size=11, bold=True, color='0F5132')
+        data_font = Font(name='Segoe UI', size=10, color='1F2328')
+
+        for row_idx, row in enumerate([headers] + rows):
             sheet.append(row)
+            is_header = (row_idx == 0)
+            is_total = any('TOTAL' in str(v).upper() for v in row)
             for cell in sheet[sheet.max_row]:
                 cell.data_type = 's'
                 cell.number_format = '@'
-                cell.alignment = Alignment(wrap_text=True, vertical='top')
+                cell.alignment = Alignment(wrap_text=True, vertical='center')
+                cell.border = thin_border
+                if not is_header:
+                    cell.font = total_font if is_total else data_font
+                    if is_total:
+                        cell.fill = total_fill
+
         for cell in sheet[1]:
-            cell.font = Font(bold=True, color='FFFFFF')
-            cell.fill = PatternFill('solid', fgColor='28755B')
-        for i in range(1, len(headers) + 1):
-            sheet.column_dimensions[get_column_letter(i)].width = 26
+            cell.font = Font(name='Segoe UI', size=11, bold=True, color='FFFFFF')
+            cell.fill = PatternFill('solid', fgColor='107C41')
+            cell.alignment = Alignment(wrap_text=True, vertical='center', horizontal='center')
+
+        # Auto-compute column widths based on content
+        for i, header in enumerate(headers, 1):
+            col_letter = get_column_letter(i)
+            max_len = len(str(header))
+            for row in rows:
+                if i - 1 < len(row):
+                    max_len = max(max_len, max(len(line) for line in str(row[i - 1]).split('\n')))
+            sheet.column_dimensions[col_letter].width = max(18, min(48, max_len + 4))
+
         sheet.freeze_panes = 'A2'
         sheet.auto_filter.ref = sheet.dimensions
         review = book.create_sheet('Review')
