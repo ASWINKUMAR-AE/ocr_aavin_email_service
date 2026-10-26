@@ -65,19 +65,27 @@ def main():
     print("Starting FastAPI Backend (Port 8000) & Vite Frontend (Port 5173)...")
     print("-" * 65)
 
+    enable_reload = '--reload' in sys.argv
+
     backend_cmd = [
         str(VENV_PYTHON),
         '-m', 'uvicorn',
         'app.main:app',
         '--app-dir', 'backend',
-        '--reload-dir', str(ROOT / 'backend'),
         '--host', '127.0.0.1',
         '--port', '8000',
-        '--reload',
         '--no-access-log'
     ]
 
+    if enable_reload:
+        backend_cmd.extend(['--reload', '--reload-dir', str(ROOT / 'backend' / 'app')])
+
     frontend_cmd = ['npm.cmd', 'run', 'dev']
+
+    # On Windows, isolate child processes into their own process group so that
+    # any CTRL_C_EVENT internally fired by uvicorn reloaders is never broadcast
+    # to this parent launcher or the PowerShell terminal console.
+    cflags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == 'win32' else 0
 
     backend_proc = subprocess.Popen(
         backend_cmd,
@@ -85,7 +93,8 @@ def main():
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
+        bufsize=1,
+        creationflags=cflags
     )
 
     frontend_proc = subprocess.Popen(
@@ -94,7 +103,8 @@ def main():
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
-        bufsize=1
+        bufsize=1,
+        creationflags=cflags
     )
 
     t_back = threading.Thread(target=stream_logs, args=(backend_proc.stdout, "Backend", "36"), daemon=True)
@@ -107,19 +117,20 @@ def main():
     print("   * Web Application : http://127.0.0.1:5173")
     print("   * Backend API Docs: http://127.0.0.1:8000/docs")
     print("   * API Health Check: http://127.0.0.1:8000/api/health")
+    if enable_reload:
+        print("   * Backend Hot-Reload: ACTIVE (watching backend/app)")
+    else:
+        print("   * Backend Mode      : STABLE (production-ready)")
     print("Press Ctrl+C to terminate both servers.\n" + "-" * 65)
 
     def shutdown_processes(signum=None, frame=None):
         print("\nStopping services...")
         for p in (backend_proc, frontend_proc):
             try:
-                p.terminate()
-            except Exception:
-                pass
-        time.sleep(0.5)
-        for p in (backend_proc, frontend_proc):
-            try:
-                p.kill()
+                if sys.platform == 'win32':
+                    subprocess.run(f'taskkill /F /T /PID {p.pid}', shell=True, capture_output=True)
+                else:
+                    p.terminate()
             except Exception:
                 pass
         print("All services stopped.")
@@ -134,10 +145,10 @@ def main():
             b_code = backend_proc.poll()
             f_code = frontend_proc.poll()
             if b_code is not None:
-                print(f"[Backend] Exited with code {b_code}")
+                print(f"[Backend] Process terminated (code {b_code})")
                 shutdown_processes()
             if f_code is not None:
-                print(f"[Frontend] Exited with code {f_code}")
+                print(f"[Frontend] Process terminated (code {f_code})")
                 shutdown_processes()
             time.sleep(1)
     except KeyboardInterrupt:
