@@ -15,13 +15,16 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
-from app import store
+from app import config, reports_store, store
 from app.config import DATA, MAX_UPLOAD, MAX_PAGES, DETECTOR, RECOGNIZER
 from app.services.documents import decode_pages, inference_image
 from app.services.ocr_engine import OCREngine
 from app.upload_limit import UploadBodyLimit
 from app.services.layout import order_document, text_for_page
+from app.services.aavin_parser import AavinAbstractParser
+from app.services.email_service import AavinReportEmailService
 from app.tables import router as tables_router
+from app.reports_api import router as reports_router
 
 engine = OCREngine()
 executor = None
@@ -32,6 +35,7 @@ admission = asyncio.Semaphore(1)
 async def lifespan(app):
     global executor
     store.initialize()
+    reports_store.initialize_reports_tables()
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='ocr')
     yield
     executor.shutdown(wait=True, cancel_futures=True)
@@ -39,6 +43,7 @@ async def lifespan(app):
 
 app = FastAPI(title='Bilingual OCR Studio', lifespan=lifespan)
 app.include_router(tables_router)
+app.include_router(reports_router)
 app.add_middleware(UploadBodyLimit)
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
 
@@ -75,6 +80,24 @@ def process(identifier):
             doc['completed_pages'] += 1
             store.save(doc)
         doc.update(status='complete', lines=lines, warning=None if lines else 'No text detected. Try a clearer image.')
+        # Automated Aavin Production Abstract extraction and persistence from live OCR
+        if lines:
+            full_text = " ".join((l.get('corrected_text') or l.get('raw_text') or '') for l in lines)
+            if AavinAbstractParser.is_aavin_abstract(full_text):
+                try:
+                    parsed_report = AavinAbstractParser.parse_aavin_abstract(
+                        raw_text=full_text,
+                        ocr_created_at=doc.get('created_at'),
+                        document_id=identifier
+                    )
+                    if parsed_report:
+                        items = parsed_report.pop('items')
+                        saved = reports_store.save_or_reconcile_report(parsed_report, items, user='live_ocr_pipeline')
+                        doc['aavin_report_id'] = saved['id']
+                        if saved['validation_status'] == 'VALIDATED' and config.REPORT_EMAIL_ENABLED and saved['email_status'] != 'SENT':
+                            AavinReportEmailService.send_report_email(saved['id'], user='auto_pipeline')
+                except Exception:
+                    pass
     except Exception as exc:
         # Never persist/log arbitrary exception strings from OCR libraries or documents.
         reason = 'Local models missing; run scripts/cache_models.py.' if isinstance(exc, RuntimeError) and 'models missing' in str(exc) else 'OCR initialization or inference failed. Run scripts/verify_ocr.py for a synthetic diagnostic.'
@@ -87,7 +110,8 @@ def process(identifier):
 @app.get('/api/health')
 def health():
     return dict(status='ok', engine_loaded=engine._pipeline is not None, detector=DETECTOR, recognizer=RECOGNIZER,
-                max_upload_mb=MAX_UPLOAD // 1024 ** 2, max_pages=MAX_PAGES)
+                max_upload_mb=MAX_UPLOAD // 1024 ** 2, max_pages=MAX_PAGES,
+                reports_subsystem='ready', reporting=config.safe_report_config())
 
 
 @app.get('/api/documents')

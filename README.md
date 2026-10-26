@@ -49,7 +49,27 @@ Installation needs internet access to download open-source packages and two offi
 
 ## Run
 
-Open two terminals at `D:\ocr`:
+### Option 1 — Single Command (Recommended)
+
+From the project root (`D:\ocr_nivas\aavin-ocr`), run:
+
+```powershell
+# In PowerShell:
+.\project_start.ps1
+# or simply:
+project_start
+```
+
+```cmd
+# In Windows Command Prompt:
+project_start.cmd
+```
+
+This single command starts both the FastAPI backend and Vite frontend concurrently, colorizes and streams logs from both services, and handles graceful shutdown when you press `Ctrl+C`.
+
+### Option 2 — Separate Terminals
+
+Open two terminals at the project root:
 
 ```powershell
 # Terminal 1 — backend
@@ -166,9 +186,75 @@ The installed PaddleX 3.3.10 performs host probes during import and does not imp
 
 Optional English-crop fallback and PP-StructureV3 are not enabled. The subsequently supplied farmer-register image was checked locally: the grid suggestion found 8 columns and 14 data rows. No user image or personal OCR text is included in test fixtures. This does not establish recognition accuracy or production readiness.
 
+## Aavin Production Abstract & Automated Email Reporting
+
+Automated data extraction, validation, SQLite storage, and responsive HTML email reporting for Aavin Milk Production Abstract reports.
+
+### Features
+
+- **Live OCR Extraction**: Detects union code, organization name, report date (parsed into ISO `YYYY-MM-DD`), shift (`EVENING`, `MORNING`), product line items (litres, packets, trays), subtotal rows (`MILK TOTAL`, `CURD & BUTTERMILK TOTAL`), and `GRAND TOTAL`.
+- **Conservative Normalization**: Handles comma-as-decimal separators and cleans attached vertical column border artifacts (`|`, `1`) only when mathematically validated against product unit volumes and subtotals.
+- **Strict Data Validation**: Validates date validity, numeric formats, and compares line-item sums against extracted subtotals and grand totals. Any arithmetic discrepancy flags an explicit warning and marks the report as `NEEDS_REVIEW`.
+- **Transactional SQLite Storage**: Reports are stored in `reports`, `report_items`, and `report_audit_logs` inside immediate transactions. Enforces unique business identity `(union_code, report_date, shift)` to prevent duplicate records.
+- **Idempotent Email Dispatch**: Reports marked `VALIDATED` are automatically emailed via SMTP if enabled. Dispatches use an official Aavin-styled responsive HTML table layout with a plain-text alternative. Reports already marked `SENT` are never re-emailed automatically upon reprocessing.
+- **Human-in-the-Loop Review**: Reports with flagged warnings require supervisor approval before email dispatch (`POST /api/reports/:id/approve` or through the UI).
+- **Audit Logging**: Every creation, reconciliation, approval, and email attempt is persisted in `report_audit_logs`.
+
+### Configuration (`.env`)
+
+Copy `.env.example` to `.env` to configure email credentials and settings:
+
+```env
+# SMTP Configuration
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_user@gmail.com
+SMTP_PASSWORD=your_app_password
+SMTP_FROM_EMAIL=your_user@gmail.com
+SMTP_FROM_NAME=Aavin OCR Reports
+SMTP_USE_TLS=true
+SMTP_USE_SSL=false
+
+# Recipients (comma-separated for multiples)
+REPORT_EMAIL_TO=operations@aavin.local
+REPORT_EMAIL_CC=
+REPORT_EMAIL_BCC=
+
+# Feature flags & Timezone
+REPORT_EMAIL_ENABLED=false   # Keep false for dry-run simulation mode
+REPORT_TIMEZONE=Asia/Kolkata
+```
+
+> [!NOTE]
+> When `REPORT_EMAIL_ENABLED=false`, the email service operates in safe dry-run mode, simulating delivery, updating status to `DISABLED`, and logging actions without connecting to an external mail server.
+
+### Report API Endpoints
+
+| Method | Endpoint | Description |
+|---|---|---|
+| `POST` | `/api/reports/ocr` | Parse and save report from raw OCR text or completed `document_id`. |
+| `GET` | `/api/reports` | List reports with optional `report_date`, `shift`, `validation_status`, and `email_status` filters. |
+| `GET` | `/api/reports/{id}` | Retrieve report details, product items, and audit trail. |
+| `GET` | `/api/reports/{id}/email-preview` | Preview email subject, plain text, and HTML table (`?html_only=true` returns raw HTML). |
+| `POST` | `/api/reports/{id}/send-email` | Manually dispatch or resend an approved report email. |
+| `POST` | `/api/reports/{id}/approve` | Approve a report in `NEEDS_REVIEW` state and optionally dispatch email. |
+| `GET` | `/api/reports/{id}/email-status` | Check email delivery submission status, sent timestamp, and logs. |
+| `GET` | `/api/health` | System health check including reports subsystem and sanitized SMTP configuration. |
+
+### Running Tests
+
+```powershell
+# Run all backend unit, integration, and acceptance tests
+.\.venv\Scripts\python.exe -m pytest -q
+
+# Run frontend tests
+Set-Location frontend
+npm.cmd test
+```
+
 ## Source layout
 
-`backend/app/main.py` owns HTTP/job lifecycle, `store.py` owns SQLite, `services/documents.py` handles decoding/resizing, and `services/ocr_engine.py` owns the Paddle adapter. `frontend/src/` contains the UI and tests. `scripts/` contains Windows launch/install commands, model caching, synthetic fixture generation and benchmarking. Private runtime data and model weights are ignored.
+`backend/app/main.py` owns HTTP/job lifecycle, `store.py` owns SQLite document persistence, `reports_store.py` owns Aavin reports database persistence, `services/aavin_parser.py` extracts and validates abstract reports, `services/email_service.py` handles HTML templating and SMTP dispatch, `services/documents.py` handles decoding/resizing, and `services/ocr_engine.py` owns the Paddle adapter. `frontend/src/` contains the UI, table workspace, and Aavin report workspace. `scripts/` contains Windows launch/install commands, model caching, synthetic fixture generation and benchmarking. Private runtime data and model weights are ignored.
 
 ## Verified upstream references
 
