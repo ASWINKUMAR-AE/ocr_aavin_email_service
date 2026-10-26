@@ -6,6 +6,7 @@ The audit guard fails those probes locally. Installation runs in a separate proc
 """
 import os
 import sys
+from app import config
 from app.config import ROOT
 
 _configured = False
@@ -22,7 +23,15 @@ def configure_offline_runtime():
     def guard(event, args):
         if event == 'socket.connect':
             address = args[1]
-            if isinstance(address, tuple) and address[0] not in ('127.0.0.1', '::1', 'localhost'):
+            if isinstance(address, tuple):
+                host = address[0]
+                port = address[1] if len(address) > 1 else None
+                # Allow loopback connections
+                if host in ('127.0.0.1', '::1', 'localhost'):
+                    return
+                # Allow outbound SMTP email dispatch
+                if config.REPORT_EMAIL_ENABLED and port in (config.SMTP_PORT, 587, 465, 25, 2525):
+                    return
                 raise OSError('Outbound network disabled in local OCR runtime')
 
     sys.addaudithook(guard)
