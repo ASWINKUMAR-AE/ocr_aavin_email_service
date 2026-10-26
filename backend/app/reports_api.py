@@ -1,6 +1,6 @@
 import asyncio
-from typing import Any, Dict, List, Optional
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
+from typing import Any, Dict, List, Optional, Union
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -18,7 +18,7 @@ class OCRParseRequest(BaseModel):
 
 
 class SendEmailRequest(BaseModel):
-    recipients: Optional[List[str]] = None
+    recipients: Optional[List[Union[Dict[str, Any], str]]] = None
     force: bool = False
 
 
@@ -34,6 +34,7 @@ async def parse_and_save_ocr(payload: OCRParseRequest, background_tasks: Backgro
     Parse Aavin production abstract report from OCR text or an existing OCR document.
     Saves to database and automatically triggers email dispatch if validated and email enabled.
     """
+    config.reload_env()
     raw_text = payload.raw_text
     doc_id = payload.document_id
     ocr_created_at = payload.ocr_created_at
@@ -68,8 +69,8 @@ async def parse_and_save_ocr(payload: OCRParseRequest, background_tasks: Backgro
     saved_report = reports_store.save_or_reconcile_report(report_data, items, user='api')
 
     # Automatic email workflow: dispatch if validated and email is enabled
-    if saved_report['validation_status'] == 'VALIDATED' and config.REPORT_EMAIL_ENABLED and saved_report['email_status'] != 'SENT':
-        background_tasks.add_task(AavinReportEmailService.send_report_email, saved_report['id'])
+    if saved_report['validation_status'] == 'VALIDATED' and config.REPORT_EMAIL_ENABLED:
+        background_tasks.add_task(AavinReportEmailService.send_report_email, saved_report['id'], force=True)
 
     return saved_report
 
@@ -88,6 +89,211 @@ def list_reports(
         validation_status=validation_status,
         email_status=email_status
     )
+
+
+def get_current_admin(authorization: Optional[str] = Header(None)) -> str:
+    """Verify admin bearer token from Authorization header."""
+    if not authorization:
+        raise HTTPException(401, "Administrator authentication required. Please log in.")
+    token = authorization.replace('Bearer ', '').replace('bearer ', '').strip()
+    username = reports_store.verify_session_token(token)
+    if not username:
+        raise HTTPException(401, "Invalid or expired administrator session. Please log in again.")
+    return username
+
+
+class AdminLoginRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class AdminChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=4)
+
+
+class UpdateSenderRequest(BaseModel):
+    smtp_host: Optional[str] = 'smtp.gmail.com'
+    smtp_port: Optional[int] = 587
+    smtp_user: Optional[str] = ''
+    smtp_password: Optional[str] = None
+    smtp_from_email: Optional[str] = None
+    smtp_from_name: Optional[str] = 'Aavin OCR Reports'
+    smtp_use_tls: bool = True
+    smtp_use_ssl: bool = False
+
+
+class RecipientPreferenceItem(BaseModel):
+    role: Optional[str] = 'STAFF'
+    name: Optional[str] = ''
+    email: str
+    send_pdf: bool = True
+    send_excel: bool = False
+
+
+class UpdateRecipientsRequest(BaseModel):
+    recipients: List[Union[RecipientPreferenceItem, Dict[str, Any], str]] = Field(..., min_length=1)
+
+
+# --- Admin Authentication Endpoints ---
+
+@router.post('/settings/admin/login')
+def admin_login(payload: AdminLoginRequest):
+    """Verify administrator credentials and issue a session token."""
+    token = reports_store.authenticate_admin(payload.username, payload.password)
+    if not token:
+        raise HTTPException(401, "Invalid administrator username or password.")
+    return {
+        'success': True,
+        'token': token,
+        'username': payload.username
+    }
+
+
+@router.post('/settings/admin/verify')
+def admin_verify(authorization: Optional[str] = Header(None)):
+    """Check if the provided admin session token is valid."""
+    username = get_current_admin(authorization)
+    return {'valid': True, 'username': username}
+
+
+@router.post('/settings/admin/change-password')
+def admin_change_password(payload: AdminChangePasswordRequest, authorization: Optional[str] = Header(None)):
+    """Change the administrator password."""
+    username = get_current_admin(authorization)
+    ok = reports_store.change_admin_password(username, payload.current_password, payload.new_password)
+    if not ok:
+        raise HTTPException(400, "Current password verification failed.")
+    return {'success': True, 'message': 'Admin password updated successfully.'}
+
+
+# --- Mail & Sender Settings Endpoints ---
+
+@router.get('/settings/mail')
+def get_mail_settings():
+    """Retrieve combined sender configuration and recipient preferences."""
+    config.reload_env()
+    return {
+        'sender': config.safe_report_config(),
+        'recipients': config.REPORT_RECIPIENT_PREFERENCES
+    }
+
+
+@router.put('/settings/sender')
+def update_sender_settings(payload: UpdateSenderRequest, authorization: Optional[str] = Header(None)):
+    """Update SMTP sender email and Google app password (admin only)."""
+    get_current_admin(authorization)
+    try:
+        updated = config.update_sender_settings(payload.model_dump())
+        return {
+            'success': True,
+            'sender': updated,
+            'message': 'Sender SMTP settings updated successfully.'
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Failed to update sender settings: {str(e)}")
+
+
+@router.post('/settings/sender/test')
+def test_sender_connection(authorization: Optional[str] = Header(None)):
+    """Test SMTP connection and authentication with current sender settings (admin only)."""
+    get_current_admin(authorization)
+    import smtplib
+    config.reload_env()
+    if not config.SMTP_HOST:
+        raise HTTPException(400, "SMTP host is not configured.")
+    try:
+        if config.SMTP_USE_SSL:
+            server = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=10)
+        else:
+            server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=10)
+            if config.SMTP_USE_TLS:
+                server.starttls()
+        if config.SMTP_USER and config.SMTP_PASSWORD:
+            server.login(config.SMTP_USER, config.SMTP_PASSWORD)
+        server.quit()
+        return {'success': True, 'message': f"Connected and authenticated successfully with {config.SMTP_HOST}:{config.SMTP_PORT} as {config.SMTP_USER}."}
+    except Exception as e:
+        return {'success': False, 'error': f"{type(e).__name__}: {str(e)}"}
+
+
+# --- Recipient Settings Endpoints ---
+
+@router.get('/settings/recipients')
+def get_report_recipients():
+    """Get current default email recipients and delivery preferences."""
+    config.reload_env()
+    return {
+        'recipients': config.REPORT_RECIPIENT_PREFERENCES,
+        'email_to': config.REPORT_EMAIL_TO,
+        'email_enabled': config.REPORT_EMAIL_ENABLED
+    }
+
+
+@router.put('/settings/recipients')
+def update_report_recipients(payload: UpdateRecipientsRequest, authorization: Optional[str] = Header(None)):
+    """Update default report email recipients and preferences in .env and runtime config."""
+    # If authorization header is provided, verify admin session
+    if authorization:
+        get_current_admin(authorization)
+
+    import re
+    email_regex = re.compile(r'^[^\s@]+@[^\s@]+\.[^\s@]+$')
+    cleaned = []
+
+    for r in payload.recipients:
+        if isinstance(r, str):
+            addr = r.strip()
+            role = 'STAFF'
+            name = ''
+            send_pdf = True
+            send_excel = False
+        elif isinstance(r, dict):
+            addr = str(r.get('email', '')).strip()
+            role = str(r.get('role', 'STAFF')).strip().upper()
+            name = str(r.get('name', '')).strip()
+            send_pdf = bool(r.get('send_pdf', True))
+            send_excel = bool(r.get('send_excel', False))
+        elif hasattr(r, 'email'):
+            addr = str(r.email).strip()
+            role = str(getattr(r, 'role', 'STAFF')).strip().upper()
+            name = str(getattr(r, 'name', '')).strip()
+            send_pdf = bool(r.send_pdf)
+            send_excel = bool(r.send_excel)
+        else:
+            continue
+
+        if not addr:
+            continue
+        if not email_regex.match(addr):
+            raise HTTPException(400, f"Invalid email format: '{addr}'")
+
+        cleaned.append({
+            'role': role or 'STAFF',
+            'name': name,
+            'email': addr,
+            'send_pdf': send_pdf,
+            'send_excel': send_excel
+        })
+
+    if not cleaned:
+        raise HTTPException(400, "At least one valid recipient email is required.")
+
+    # Deduplicate by email address, keeping the last preference set
+    seen = {}
+    for item in cleaned:
+        seen[item['email'].lower()] = item
+    unique_recipients = list(seen.values())
+
+    try:
+        updated = config.update_report_recipients(unique_recipients)
+        return {
+            'success': True,
+            'recipients': updated,
+            'message': f"Updated {len(updated)} default recipient(s)."
+        }
+    except Exception as e:
+        raise HTTPException(500, f"Failed to update recipients: {str(e)}")
 
 
 @router.get('/{report_id}')
@@ -122,6 +328,7 @@ def get_email_preview(report_id: str, html_only: bool = False):
 @router.post('/{report_id}/send-email')
 async def send_report_email(report_id: str, payload: SendEmailRequest):
     """Manually dispatch or resend an approved report email."""
+    config.reload_env()
     report = reports_store.get_report(report_id)
     if not report:
         raise HTTPException(404, 'Report not found')

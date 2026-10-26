@@ -28,19 +28,14 @@ def free_port(port: int):
 
     print(f"Port {port} is currently in use. Releasing port...")
     try:
-        # Use netstat to find owning PID
-        cmd = f'netstat -ano -p tcp | findstr :{port}'
+        cmd = f'powershell -Command "Get-NetTCPConnection -LocalPort {port} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique"'
         output = subprocess.check_output(cmd, shell=True, text=True, errors='ignore')
-        killed = set()
-        for line in output.strip().splitlines():
-            parts = line.split()
-            if len(parts) >= 5 and 'LISTENING' in line.upper():
-                pid = parts[-1]
-                if pid.isdigit() and pid != '0' and pid not in killed and int(pid) != os.getpid():
-                    subprocess.run(f'taskkill /F /PID {pid}', shell=True, capture_output=True)
-                    killed.add(pid)
-                    print(f"Terminated stale process (PID {pid}) on port {port}.")
-        time.sleep(1)
+        for pid_str in output.strip().splitlines():
+            pid_str = pid_str.strip()
+            if pid_str.isdigit() and int(pid_str) not in (0, os.getpid()):
+                subprocess.run(f'powershell -Command "Stop-Process -Id {pid_str} -Force -ErrorAction SilentlyContinue"', shell=True, capture_output=True)
+                print(f"Terminated stale process (PID {pid_str}) on port {port}.")
+        time.sleep(1.2)
     except Exception:
         pass
 
@@ -75,9 +70,10 @@ def main():
         '-m', 'uvicorn',
         'app.main:app',
         '--app-dir', 'backend',
+        '--reload-dir', str(ROOT / 'backend'),
         '--host', '127.0.0.1',
         '--port', '8000',
-        '--workers', '1',
+        '--reload',
         '--no-access-log'
     ]
 

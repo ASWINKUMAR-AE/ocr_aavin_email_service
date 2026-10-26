@@ -2,6 +2,7 @@ import logging
 import smtplib
 from datetime import datetime, timezone
 from decimal import Decimal
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate, make_msgid
@@ -9,6 +10,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from app import config, reports_store
+from app.services.aavin_excel import generate_aavin_excel
+from app.services.aavin_pdf import generate_aavin_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -312,86 +315,176 @@ class AavinReportEmailService:
                 'validation_warnings': report['validation_warnings']
             }
 
-        # Check configuration
-        to_list = recipients or config.REPORT_EMAIL_TO
-        cc_list = config.REPORT_EMAIL_CC
-        bcc_list = config.REPORT_EMAIL_BCC
+        # Resolve target recipients and preferences
+        config.reload_env()
+        target_recipients: List[Dict[str, Any]] = []
 
-        if not to_list:
+        if recipients:
+            pref_map = {p['email'].lower(): p for p in config.REPORT_RECIPIENT_PREFERENCES}
+            for r in recipients:
+                if isinstance(r, str):
+                    addr = r.strip()
+                    if not addr:
+                        continue
+                    if addr.lower() in pref_map:
+                        target_recipients.append(pref_map[addr.lower()])
+                    else:
+                        target_recipients.append({'email': addr, 'send_pdf': True, 'send_excel': False})
+                elif isinstance(r, dict):
+                    addr = str(r.get('email', '')).strip()
+                    if not addr:
+                        continue
+                    target_recipients.append({
+                        'email': addr,
+                        'send_pdf': bool(r.get('send_pdf', True)),
+                        'send_excel': bool(r.get('send_excel', False)),
+                    })
+        else:
+            target_recipients = list(config.REPORT_RECIPIENT_PREFERENCES)
+
+        if not target_recipients:
             msg = "No recipient email configured (REPORT_EMAIL_TO is empty)."
             reports_store.update_email_status(report_id, 'FAILED', details=msg)
             return {'success': False, 'status': 'FAILED', 'error': msg, 'report_id': report_id}
 
+        # Filter active recipients vs muted recipients (both unchecked = no email sent)
+        active_recipients = [
+            r for r in target_recipients
+            if r.get('email') and (r.get('send_pdf') or r.get('send_excel'))
+        ]
+        skipped_recipients = [
+            r for r in target_recipients
+            if r.get('email') and not (r.get('send_pdf') or r.get('send_excel'))
+        ]
+
+        if not active_recipients:
+            msg = f"All configured recipients ({', '.join(r['email'] for r in skipped_recipients)}) have both PDF and Excel unselected (muted). No email was sent."
+            logger.info("Report %s skipped email delivery: %s", report_id, msg)
+            reports_store.update_email_status(report_id, 'SKIPPED', details=msg)
+            return {
+                'success': True,
+                'status': 'SKIPPED',
+                'message': msg,
+                'report_id': report_id,
+                'skipped_recipients': [r['email'] for r in skipped_recipients]
+            }
+
         subject, plain_body, html_body = cls.generate_email_content(report)
+        date_str = format_report_date_subject(report['report_date'])
+        shift_str = (report.get('shift') or 'shift').lower()
+        pdf_filename = f"Aavin_Production_Abstract_{date_str}_{shift_str}.pdf"
+        excel_filename = f"Aavin_Production_Abstract_{date_str}_{shift_str}.xlsx"
+
+        # Generate required attachments
+        needs_pdf = any(r.get('send_pdf') for r in active_recipients)
+        needs_excel = any(r.get('send_excel') for r in active_recipients)
+
+        pdf_bytes = generate_aavin_pdf(report) if needs_pdf else None
+        excel_bytes = generate_aavin_excel(report) if needs_excel else None
 
         # Check if email sending is enabled (dry-run mode)
         if not config.REPORT_EMAIL_ENABLED:
-            logger.info("REPORT_EMAIL_ENABLED is false. Simulating dry-run email for report %s to %s", report_id, to_list)
-            now_utc = datetime.now(timezone.utc).isoformat()
+            logger.info("REPORT_EMAIL_ENABLED is false. Simulating dry-run email for report %s", report_id)
+            desc_list = []
+            for r in active_recipients:
+                atts = []
+                if r.get('send_pdf'):
+                    atts.append('PDF Report')
+                if r.get('send_excel'):
+                    atts.append('Excel Sheet')
+                desc_list.append(f"{r['email']} ({' + '.join(atts)})")
+
+            details_msg = f"Dry-run mode (REPORT_EMAIL_ENABLED=false). Prepared separate emails for: {'; '.join(desc_list)} with subject: '{subject}'"
+            if skipped_recipients:
+                details_msg += f". Skipped muted: {', '.join(r['email'] for r in skipped_recipients)}"
+
             reports_store.update_email_status(
                 report_id,
                 'DISABLED',
-                details=f"Dry-run mode (REPORT_EMAIL_ENABLED=false). Prepared email to {', '.join(to_list)} with subject: '{subject}'"
+                details=details_msg
             )
             return {
                 'success': True,
                 'dry_run': True,
                 'status': 'DISABLED',
-                'recipients': to_list,
+                'active_recipients': active_recipients,
+                'skipped_recipients': [r['email'] for r in skipped_recipients],
                 'subject': subject,
                 'message': "Email service is running in dry-run mode (REPORT_EMAIL_ENABLED=false). To send live emails, set REPORT_EMAIL_ENABLED=true and configure SMTP in .env.",
                 'report_id': report_id
             }
 
-        # Construct MIME Message
-        msg = MIMEMultipart('alternative')
-        msg['Subject'] = subject
-        msg['From'] = f"{config.SMTP_FROM_NAME} <{config.SMTP_FROM_EMAIL}>" if config.SMTP_FROM_NAME else config.SMTP_FROM_EMAIL
-        msg['To'] = ", ".join(to_list)
-        if cc_list:
-            msg['Cc'] = ", ".join(cc_list)
-        msg['Date'] = formatdate(localtime=True)
-        msg['Message-ID'] = make_msgid(domain='aavin.local')
-
-        # Attach alternative plain text and HTML
-        msg.attach(MIMEText(plain_body, 'plain', 'utf-8'))
-        msg.attach(MIMEText(html_body, 'html', 'utf-8'))
-
-        all_recipients = to_list + cc_list + bcc_list
+        from_header = f"{config.SMTP_FROM_NAME} <{config.SMTP_FROM_EMAIL}>" if config.SMTP_FROM_NAME else config.SMTP_FROM_EMAIL
+        delivered_recipients: List[str] = []
+        delivery_errors: List[str] = []
 
         try:
             if config.SMTP_USE_SSL:
-                server = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
+                server = smtplib.SMTP_SSL(config.SMTP_HOST, config.SMTP_PORT, timeout=20)
             else:
-                server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=15)
+                server = smtplib.SMTP(config.SMTP_HOST, config.SMTP_PORT, timeout=20)
                 if config.SMTP_USE_TLS:
                     server.starttls()
 
             if config.SMTP_USER and config.SMTP_PASSWORD:
                 server.login(config.SMTP_USER, config.SMTP_PASSWORD)
 
-            server.sendmail(config.SMTP_FROM_EMAIL, all_recipients, msg.as_string())
+            # Send individual separate email to each recipient
+            for target in active_recipients:
+                target_email = target['email']
+                msg = MIMEMultipart('mixed')
+                msg['Subject'] = subject
+                msg['From'] = from_header
+                msg['To'] = target_email
+                msg['Date'] = formatdate(localtime=True)
+                msg['Message-ID'] = make_msgid(domain='aavin.local')
+
+                # Body alternative container
+                alt_part = MIMEMultipart('alternative')
+                alt_part.attach(MIMEText(plain_body, 'plain', 'utf-8'))
+                alt_part.attach(MIMEText(html_body, 'html', 'utf-8'))
+                msg.attach(alt_part)
+
+                # Attach PDF if selected for this recipient
+                if target.get('send_pdf') and pdf_bytes:
+                    part_pdf = MIMEApplication(pdf_bytes, _subtype='pdf')
+                    part_pdf.add_header('Content-Disposition', 'attachment', filename=pdf_filename)
+                    msg.attach(part_pdf)
+
+                # Attach Excel if selected for this recipient
+                if target.get('send_excel') and excel_bytes:
+                    part_excel = MIMEApplication(excel_bytes, _subtype='vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+                    part_excel.add_header('Content-Disposition', 'attachment', filename=excel_filename)
+                    msg.attach(part_excel)
+
+                server.sendmail(config.SMTP_FROM_EMAIL, [target_email], msg.as_string())
+                delivered_recipients.append(target_email)
+
             server.quit()
 
             now_utc = datetime.now(timezone.utc).isoformat()
+            audit_msg = f"Successfully delivered individual emails to {', '.join(delivered_recipients)}."
+            if skipped_recipients:
+                audit_msg += f" (Muted/Skipped: {', '.join(r['email'] for r in skipped_recipients)})"
+
             reports_store.update_email_status(
                 report_id,
                 'SENT',
                 sent_at=now_utc,
-                details=f"Successfully sent email report by {user} to {', '.join(all_recipients)}."
+                details=audit_msg
             )
 
             return {
                 'success': True,
                 'status': 'SENT',
                 'sent_at': now_utc,
-                'recipients': to_list,
+                'delivered_recipients': delivered_recipients,
+                'skipped_recipients': [r['email'] for r in skipped_recipients],
                 'subject': subject,
                 'report_id': report_id
             }
 
         except Exception as e:
-            # Never expose passwords or raw traceback in logs/storage
             clean_error = f"{type(e).__name__}: {str(e)}"
             logger.error("Failed to deliver Aavin report email for %s: %s", report_id, clean_error)
             reports_store.update_email_status(

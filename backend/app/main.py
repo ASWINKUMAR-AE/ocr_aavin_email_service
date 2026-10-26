@@ -85,6 +85,7 @@ def process(identifier):
             full_text = " ".join((l.get('corrected_text') or l.get('raw_text') or '') for l in lines)
             if AavinAbstractParser.is_aavin_abstract(full_text):
                 try:
+                    config.reload_env()
                     parsed_report = AavinAbstractParser.parse_aavin_abstract(
                         raw_text=full_text,
                         ocr_created_at=doc.get('created_at'),
@@ -94,8 +95,8 @@ def process(identifier):
                         items = parsed_report.pop('items')
                         saved = reports_store.save_or_reconcile_report(parsed_report, items, user='live_ocr_pipeline')
                         doc['aavin_report_id'] = saved['id']
-                        if saved['validation_status'] == 'VALIDATED' and config.REPORT_EMAIL_ENABLED and saved['email_status'] != 'SENT':
-                            AavinReportEmailService.send_report_email(saved['id'], user='auto_pipeline')
+                        if saved['validation_status'] == 'VALIDATED' and config.REPORT_EMAIL_ENABLED:
+                            AavinReportEmailService.send_report_email(saved['id'], user='auto_pipeline', force=True)
                 except Exception:
                     pass
     except Exception as exc:

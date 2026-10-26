@@ -411,3 +411,184 @@ def test_acceptance_two_different_live_ocr_reports_and_job_isolation():
         # Call count must still be 1!
         assert mock_smtp.sendmail.call_count == 1
 
+
+def test_get_and_update_recipient_settings():
+    """Verify retrieval and updating of default email recipients and delivery preferences."""
+    # 1. GET recipients
+    get_res = client.get('/api/reports/settings/recipients')
+    assert get_res.status_code == 200
+    data = get_res.json()
+    assert 'recipients' in data
+    assert isinstance(data['recipients'], list)
+
+    # 2. PUT with valid emails and preferences (mock config.update_report_recipients)
+    mock_ret = [
+        {'email': 'new1@test.com', 'send_pdf': True, 'send_excel': False},
+        {'email': 'new2@test.com', 'send_pdf': True, 'send_excel': True}
+    ]
+    with patch('app.config.update_report_recipients', return_value=mock_ret):
+        put_res = client.put('/api/reports/settings/recipients', json={
+            'recipients': [
+                {'email': 'new1@test.com', 'send_pdf': True, 'send_excel': False},
+                {'email': 'new2@test.com', 'send_pdf': True, 'send_excel': True}
+            ]
+        })
+        assert put_res.status_code == 200
+        assert put_res.json()['success'] is True
+        assert len(put_res.json()['recipients']) == 2
+        assert put_res.json()['recipients'][1]['send_excel'] is True
+
+    # 3. PUT with invalid email format
+    bad_res = client.put('/api/reports/settings/recipients', json={
+        'recipients': ['not-an-email']
+    })
+    assert bad_res.status_code == 400
+    assert 'Invalid email format' in bad_res.json()['detail']
+
+    # 4. PUT with empty recipients
+    empty_res = client.put('/api/reports/settings/recipients', json={
+        'recipients': []
+    })
+    assert empty_res.status_code in (400, 422)
+
+
+def test_pdf_and_excel_generation():
+    """Verify that PDF and Excel files are generated cleanly without exceptions."""
+    from app.services.aavin_excel import generate_aavin_excel
+    from app.services.aavin_pdf import generate_aavin_pdf
+
+    parsed = AavinAbstractParser.parse_aavin_abstract(PERFECT_OCR_TEXT)
+    items = parsed.pop('items')
+    report = reports_store.save_or_reconcile_report(parsed, items, user='test')
+
+    pdf_bytes = generate_aavin_pdf(report)
+    excel_bytes = generate_aavin_excel(report)
+
+    assert isinstance(pdf_bytes, bytes)
+    assert len(pdf_bytes) > 1000
+    assert pdf_bytes.startswith(b'%PDF-')
+
+    assert isinstance(excel_bytes, bytes)
+    assert len(excel_bytes) > 1000
+    # ZIP header for xlsx
+    assert excel_bytes.startswith(b'PK')
+
+
+def test_individual_email_dispatch_with_attachment_selection():
+    """
+    Verify delivery matrix:
+    - Recipient 1: send_pdf=True, send_excel=False -> Gets separate email with PDF attached.
+    - Recipient 2: send_pdf=True, send_excel=True  -> Gets separate email with PDF + Excel attached.
+    - Recipient 3: send_pdf=False, send_excel=False -> Muted! Skipped entirely.
+    """
+    parsed = AavinAbstractParser.parse_aavin_abstract(PERFECT_OCR_TEXT)
+    items = parsed.pop('items')
+    report = reports_store.save_or_reconcile_report(parsed, items, user='test')
+    rep_id = report['id']
+
+    custom_recipients = [
+        {'email': 'pdf_only@test.com', 'send_pdf': True, 'send_excel': False},
+        {'email': 'both@test.com', 'send_pdf': True, 'send_excel': True},
+        {'email': 'muted@test.com', 'send_pdf': False, 'send_excel': False},
+    ]
+
+    mock_smtp = MagicMock()
+    with patch('smtplib.SMTP', return_value=mock_smtp), \
+         patch('app.config.SMTP_HOST', 'smtp.test.local'), \
+         patch('app.config.SMTP_PORT', 587), \
+         patch('app.config.REPORT_EMAIL_ENABLED', True):
+
+        res = AavinReportEmailService.send_report_email(rep_id, recipients=custom_recipients, force=True)
+
+        assert res['success'] is True
+        assert res['status'] == 'SENT'
+        # Two separate emails sent, muted is skipped!
+        assert mock_smtp.sendmail.call_count == 2
+        assert res['delivered_recipients'] == ['pdf_only@test.com', 'both@test.com']
+        assert res['skipped_recipients'] == ['muted@test.com']
+
+        # Inspect sent email arguments
+        calls = mock_smtp.sendmail.call_args_list
+        # Call 1: pdf_only@test.com
+        assert calls[0][0][1] == ['pdf_only@test.com']
+        msg_raw_1 = calls[0][0][2]
+        assert 'Content-Disposition: attachment; filename="Aavin_Production_Abstract_' in msg_raw_1
+        assert '.pdf"' in msg_raw_1
+        assert '.xlsx"' not in msg_raw_1
+
+        # Call 2: both@test.com
+        assert calls[1][0][1] == ['both@test.com']
+        msg_raw_2 = calls[1][0][2]
+        assert '.pdf"' in msg_raw_2
+        assert '.xlsx"' in msg_raw_2
+
+
+def test_all_recipients_muted_skips_dispatch():
+    """Verify that if all recipients have both options unticked, no email is sent."""
+    parsed = AavinAbstractParser.parse_aavin_abstract(PERFECT_OCR_TEXT)
+    items = parsed.pop('items')
+    report = reports_store.save_or_reconcile_report(parsed, items, user='test')
+
+    all_muted = [
+        {'email': 'muted1@test.com', 'send_pdf': False, 'send_excel': False},
+        {'email': 'muted2@test.com', 'send_pdf': False, 'send_excel': False},
+    ]
+
+    mock_smtp = MagicMock()
+    with patch('smtplib.SMTP', return_value=mock_smtp), \
+         patch('app.config.REPORT_EMAIL_ENABLED', True):
+        res = AavinReportEmailService.send_report_email(report['id'], recipients=all_muted, force=True)
+        assert res['success'] is True
+        assert res['status'] == 'SKIPPED'
+        assert mock_smtp.sendmail.call_count == 0
+
+
+def test_admin_authentication_and_sender_settings():
+    """Verify admin login, token verification, password change, and sender settings."""
+    # 1. Login with bad credentials
+    bad_login = client.post('/api/reports/settings/admin/login', json={'username': 'admin', 'password': 'wrongpassword'})
+    assert bad_login.status_code == 401
+
+    # 2. Login with initial default admin credentials (admin / admin123)
+    login_res = client.post('/api/reports/settings/admin/login', json={'username': 'admin', 'password': 'admin123'})
+    assert login_res.status_code == 200
+    token = login_res.json()['token']
+    assert token is not None
+
+    headers = {'Authorization': f'Bearer {token}'}
+
+    # 3. Verify session
+    verify_res = client.post('/api/reports/settings/admin/verify', headers=headers)
+    assert verify_res.status_code == 200
+    assert verify_res.json()['username'] == 'admin'
+
+    # 4. Get mail settings
+    mail_res = client.get('/api/reports/settings/mail')
+    assert mail_res.status_code == 200
+    assert 'sender' in mail_res.json()
+    assert 'recipients' in mail_res.json()
+
+    # 5. Update sender settings with admin auth
+    with patch('app.config.update_sender_settings', return_value={'smtp_user': 'new_sender@aavin.gov.in'}):
+        sender_res = client.put('/api/reports/settings/sender', headers=headers, json={
+            'smtp_host': 'smtp.gmail.com',
+            'smtp_port': 587,
+            'smtp_user': 'new_sender@aavin.gov.in',
+            'smtp_password': 'secret_app_password',
+            'smtp_from_email': 'new_sender@aavin.gov.in',
+            'smtp_from_name': 'Official Aavin Reports',
+            'smtp_use_tls': True,
+            'smtp_use_ssl': False
+        })
+        assert sender_res.status_code == 200
+        assert sender_res.json()['success'] is True
+
+    # 6. Unauthenticated update attempt should be rejected with 401
+    unauth_res = client.put('/api/reports/settings/sender', json={
+        'smtp_user': 'hacker@test.com'
+    })
+    assert unauth_res.status_code == 401
+
+
+
+

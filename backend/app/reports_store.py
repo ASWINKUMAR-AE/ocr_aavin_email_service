@@ -1,8 +1,11 @@
+import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.config import DATA
@@ -17,8 +20,22 @@ def db_connection():
         yield db
 
 
+def hash_password(password: str, salt: Optional[str] = None) -> tuple[str, str]:
+    """Derive PBKDF2 HMAC SHA-256 hash with unique salt."""
+    if not salt:
+        salt = secrets.token_hex(16)
+    hashed = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000).hex()
+    return hashed, salt
+
+
+def verify_password(password: str, password_hash: str, salt: str) -> bool:
+    """Verify raw password against stored PBKDF2 hash using constant-time comparison."""
+    hashed, _ = hash_password(password, salt)
+    return hmac.compare_digest(hashed, password_hash)
+
+
 def initialize_reports_tables():
-    """Create schema for reports, report items, and audit logs."""
+    """Create schema for reports, report items, audit logs, and admin credentials."""
     with db_connection() as db:
         db.execute('''
             CREATE TABLE IF NOT EXISTS reports (
@@ -80,12 +97,97 @@ def initialize_reports_tables():
             )
         ''')
 
+        # Admin user accounts for protecting Mail Settings
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS admin_users (
+                id TEXT PRIMARY KEY,
+                username TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+
+        # Active admin sessions
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS admin_sessions (
+                token TEXT PRIMARY KEY,
+                username TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL
+            )
+        ''')
+
         db.execute('CREATE INDEX IF NOT EXISTS idx_reports_date ON reports (report_date)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_reports_shift ON reports (shift)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_reports_val_status ON reports (validation_status)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_reports_email_status ON reports (email_status)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_report_items_report_id ON report_items (report_id)')
         db.execute('CREATE INDEX IF NOT EXISTS idx_report_audit_report_id ON report_audit_logs (report_id)')
+
+    ensure_default_admin()
+
+
+def ensure_default_admin(default_user: str = 'admin', default_pass: str = 'admin123'):
+    """Ensure at least one admin user exists with initial default credentials."""
+    with db_connection() as db:
+        row = db.execute('SELECT id FROM admin_users LIMIT 1').fetchone()
+        if not row:
+            p_hash, salt = hash_password(default_pass)
+            now = datetime.now(timezone.utc).isoformat()
+            db.execute(
+                'INSERT INTO admin_users (id, username, password_hash, salt, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)',
+                (str(uuid.uuid4()), default_user, p_hash, salt, now, now)
+            )
+
+
+def authenticate_admin(username: str, password: str) -> Optional[str]:
+    """Verify admin credentials and issue a 24-hour session token."""
+    ensure_default_admin()
+    with db_connection() as db:
+        row = db.execute('SELECT username, password_hash, salt FROM admin_users WHERE username = ?', (username.strip(),)).fetchone()
+        if not row:
+            return None
+        if verify_password(password, row['password_hash'], row['salt']):
+            token = secrets.token_urlsafe(32)
+            now = datetime.now(timezone.utc)
+            expires = (now + timedelta(hours=24)).isoformat()
+            db.execute(
+                'INSERT INTO admin_sessions (token, username, created_at, expires_at) VALUES (?, ?, ?, ?)',
+                (token, row['username'], now.isoformat(), expires)
+            )
+            return token
+        return None
+
+
+def verify_session_token(token: str) -> Optional[str]:
+    """Validate session token and return admin username if active."""
+    if not token:
+        return None
+    now_iso = datetime.now(timezone.utc).isoformat()
+    with db_connection() as db:
+        row = db.execute(
+            'SELECT username FROM admin_sessions WHERE token = ? AND expires_at > ?',
+            (token, now_iso)
+        ).fetchone()
+        return row['username'] if row else None
+
+
+def change_admin_password(username: str, current_password: str, new_password: str) -> bool:
+    """Safely update admin password after verifying current password."""
+    ensure_default_admin()
+    with db_connection() as db:
+        row = db.execute('SELECT username, password_hash, salt FROM admin_users WHERE username = ?', (username,)).fetchone()
+        if not row or not verify_password(current_password, row['password_hash'], row['salt']):
+            return False
+        new_hash, new_salt = hash_password(new_password)
+        now = datetime.now(timezone.utc).isoformat()
+        db.execute(
+            'UPDATE admin_users SET password_hash = ?, salt = ?, updated_at = ? WHERE username = ?',
+            (new_hash, new_salt, now, username)
+        )
+        return True
 
 
 def log_audit(report_id: str, action: str, details: str):

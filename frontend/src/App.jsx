@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { ScanLine, Upload, FileText, ShieldCheck, Sun, Moon, Search, ZoomIn, ZoomOut, Check, Download, Layers, ArrowUpRight, X, LoaderCircle } from 'lucide-react';
-import { request, effectiveText } from './api';
+import { ScanLine, Upload, FileText, ShieldCheck, Sun, Moon, Search, ZoomIn, ZoomOut, Check, Download, Layers, ArrowUpRight, X, LoaderCircle, Mail } from 'lucide-react';
+import { request, effectiveText, rowText } from './api';
 import TableWorkspace from './TableWorkspace';
 import AavinReportWorkspace from './AavinReportWorkspace';
+import RecipientSettingsModal from './RecipientSettingsModal';
 
 export function LineEditor({ line, selected, onSelect, onSave, history }) {
   const [text, setText] = useState(effectiveText(line));
@@ -32,6 +33,7 @@ export default function App() {
   const [tab, setTab] = useState('lines');
   const [tableDirty, setTableDirty] = useState(false);
   const [dark, setDark] = useState(localStorage.getItem('ocr-theme') === 'dark');
+  const [recipientModalOpen, setRecipientModalOpen] = useState(false);
   const fileRef = useRef(null);
   const viewport = useRef(null);
   const activeId = useRef(null);
@@ -44,13 +46,31 @@ export default function App() {
     const timer = setInterval(() => request(`/documents/${id}`).then(next => {
       if (activeId.current !== id) return;
       setDoc(next); setDocuments(old => old.map(d => d.id === id ? {...d, status: next.status} : d));
+      if (next.status === 'complete') {
+        const fullText = (next.lines || []).map(l => (l.corrected_text ?? l.raw_text ?? '')).join(' ').toUpperCase();
+        const isAavin = next.aavin_report_id || (
+          (fullText.includes('MADURAI') || fullText.includes('AAVIN') || fullText.includes('CO-OPERATIVE')) &&
+          (fullText.includes('ABSTRACT') || fullText.includes('MILK') || fullText.includes('CURD'))
+        );
+        if (isAavin) {
+          setTab('aavin');
+        }
+      }
     }).catch(e => setError(e.message)), 1500);
     return () => clearInterval(timer);
   }, [doc?.id, doc?.status]);
   async function openDocument(id) {
     if (tableDirty && !window.confirm('Discard unsaved table changes and open another document?')) return;
     activeId.current = id;
-    try { const next = await request(`/documents/${id}`); if (activeId.current === id) { setDoc(next); setPage(0); setSelected(null); setZoom(100); setError(''); } } catch (e) { setError(e.message); }
+    try {
+      const next = await request(`/documents/${id}`);
+      if (activeId.current === id) {
+        setDoc(next); setPage(0); setSelected(null); setZoom(100); setError('');
+        if (next.status === 'complete' && next.aavin_report_id) {
+          setTab('aavin');
+        }
+      }
+    } catch (e) { setError(e.message); }
   }
   async function upload(file) {
     if (!file || processing) return;
@@ -76,7 +96,7 @@ export default function App() {
       <div className="document-list">{documents.length ? documents.map(d => <button key={d.id} onClick={() => openDocument(d.id)} className={doc?.id === d.id ? 'document-item active' : 'document-item'}><FileText size={17} /><span><strong>{d.name}</strong><small>{d.status}</small></span></button>) : <p className="muted sidebar-empty">Your documents will appear here. Everything stays on this device.</p>}</div>
       <div className="local-card"><ShieldCheck size={21} /><strong>Private by design</strong><p>Local processing. No cloud uploads. Your pages stay yours.</p><span><i /> CPU · Tamil + English</span></div>
     </aside>
-    <main><header><div className="breadcrumb">Workspace <span>/</span> <strong>Document studio</strong></div><div className="header-actions"><span className="local-pill"><i /> Local workspace</span><button className="icon-button" aria-label="Toggle color theme" onClick={() => setDark(!dark)}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button></div></header>
+    <main><header><div className="breadcrumb">Workspace <span>/</span> <strong>Document studio</strong></div><div className="header-actions"><button className="back-btn" onClick={() => setRecipientModalOpen(true)} data-testid="top-recipient-settings-btn" style={{ fontSize: '12px', padding: '5px 11px', display: 'inline-flex', alignItems: 'center', gap: '6px' }} title="Configure sender and recipient mail settings"><Mail size={14} /> Mail Settings</button><span className="local-pill"><i /> Local workspace</span><button className="icon-button" aria-label="Toggle color theme" onClick={() => setDark(!dark)}>{dark ? <Sun size={19} /> : <Moon size={19} />}</button></div></header>
       <div className="main-content"><div className="page-heading"><div><div className="eyebrow">FROM NOTEBOOK TO EDITABLE TEXT</div><h1>A clearer way to read your pages.</h1><p>Extract Tamil & English text, check every line, and make it yours.</p></div><button className="primary" disabled={processing} onClick={() => fileRef.current.click()}><Upload size={17} /> {uploading ? 'Uploading…' : 'Upload document'}</button></div>
         <input ref={fileRef} type="file" accept=".png,.jpg,.jpeg,.pdf" aria-label="Upload document file" className="sr-only" onChange={e => upload(e.target.files[0])} />
         {error && <div className="error-banner" role="alert">{error}<button aria-label="Dismiss error" onClick={() => setError('')}><X size={17}/></button></div>}
@@ -95,15 +115,10 @@ export default function App() {
               <div className="export-bar"><span><Download size={16}/> Export saved text</span><div>{['xlsx','csv','json','txt'].map(format => <a key={format} aria-disabled={doc.status !== 'complete'} href={doc.status === 'complete' ? `/api/documents/${doc.id}/export/${format}` : undefined}>{format.toUpperCase()}</a>)}</div></div>
             </section></div>}</>}
         <footer><span><ShieldCheck size={14}/> Processed on your device. Never uploaded to a cloud.</span><span>PP-OCRv5 · Human review first</span></footer>
-      </div></main></div>;
+      </div></main>
+    <RecipientSettingsModal isOpen={recipientModalOpen} onClose={() => setRecipientModalOpen(false)} />
+  </div>;
 }
 
-export function rowText(lines) {
-  const rows = new Map();
-  lines.forEach(line => {
-    const key = line.row_index ?? line.reading_order;
-    if (!rows.has(key)) rows.set(key, []);
-    rows.get(key).push(effectiveText(line));
-  });
-  return [...rows.values()].map(row => row.join('\t')).join('\n');
-}
+export { rowText };
+
