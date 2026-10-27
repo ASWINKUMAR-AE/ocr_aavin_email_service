@@ -623,11 +623,19 @@ def test_parse_noisy_dot_matrix_ocr():
     assert parsed['grand_total_litres'] == '49135.095'
     assert parsed['grand_total_packets'] == 107434
 
+    assert parsed['milk_total_trays'] == '4156.00'
+    assert parsed['curd_buttermilk_total_trays'] == '17.00'
+    assert parsed['grand_total_trays'] == '4173.00'
+
     # Check that all 9 products + 3 subtotals = 12 items are present
     assert len(parsed['items']) == 12
     product_items = [i for i in parsed['items'] if i['row_type'] == 'PRODUCT']
     assert len(product_items) == 9
     assert [i['item_no'] for i in product_items] == list(range(1, 10))
+
+    # Verify tray numbers: trailing '|' symbol border is stripped and not taken as 1
+    expected_trays = ['2148.01', '476.18', '1026.18', '462.03', '44.10', '1.00', '8.22', '7.59', '1.31']
+    assert [i['quantity_trays'] for i in product_items] == expected_trays
 
 
 

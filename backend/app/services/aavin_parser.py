@@ -49,6 +49,47 @@ def sanitize_int(val: Any) -> int:
         return 0
 
 
+def sanitize_tray_str(val: Any) -> str:
+    """
+    Sanitize tray decimal string.
+    On Aavin dot-matrix abstracts, Tray numbers are printed with 2 decimal places.
+    The rightmost table border '|' is often captured as trailing '|' or misread as digit '1' or 'I'.
+    Strip the border artifact while preserving legitimate numbers.
+    """
+    if val is None:
+        return "0.00"
+    s = str(val).strip().replace(' ', '')
+    # Strip any trailing border symbols: |, I, l, (, ), /, -, etc.
+    s = re.sub(r'[|Il()/\-]+$', '', s)
+    s = re.sub(r'^[|Il()/\-]+', '', s)
+    # If comma is followed by 2, 3 or 4 digits and preceded by digits, treat as decimal point
+    if re.search(r'\d+,\d{2,4}$', s):
+        s = s.replace(',', '.')
+    else:
+        s = s.replace(',', '')
+
+    # If there are 3 decimals and the 3rd decimal is '1' or 'I' (e.g. .011, .181, .031, .001, .221, .591, .311),
+    # in dot-matrix tables this trailing '1' is the misread rightmost column border '|'
+    m3 = re.search(r'^(\d+\.\d{2})[1|I]$', s)
+    if m3:
+        s = m3.group(1)
+
+    # If there are 4 decimals ending in 1/I (e.g. .0101)
+    m4 = re.search(r'^(\d+\.\d{2,3})[1|I]$', s)
+    if m4:
+        s = m4.group(1)
+
+    s = re.sub(r'[^\d.]', '', s)
+    if not s or s == '.':
+        return "0.00"
+    try:
+        d = Decimal(s)
+        return f"{d:.2f}"
+    except (InvalidOperation, ValueError):
+        return "0.00"
+
+
+
 def extract_unit_size_litres(product_name: str) -> Optional[Decimal]:
     """Determine nominal package unit size in litres from product description."""
     upper = product_name.upper()
@@ -201,13 +242,13 @@ class AavinAbstractParser:
         subtotals: Dict[str, Any] = {
             'milk_total_litres': Decimal('0.000'),
             'milk_total_packets': 0,
-            'milk_total_trays': Decimal('0.000'),
+            'milk_total_trays': Decimal('0.00'),
             'curd_buttermilk_total_litres': Decimal('0.000'),
             'curd_buttermilk_total_packets': 0,
-            'curd_buttermilk_total_trays': Decimal('0.000'),
+            'curd_buttermilk_total_trays': Decimal('0.00'),
             'grand_total_litres': Decimal('0.000'),
             'grand_total_packets': 0,
-            'grand_total_trays': Decimal('0.000'),
+            'grand_total_trays': Decimal('0.00'),
         }
 
         # Normalize line breaks and spaces for regex token extraction
@@ -223,7 +264,7 @@ class AavinAbstractParser:
         if m_milk_tot:
             subtotals['milk_total_litres'] = Decimal(sanitize_decimal_str(m_milk_tot.group(1)))
             subtotals['milk_total_packets'] = sanitize_int(m_milk_tot.group(2))
-            subtotals['milk_total_trays'] = Decimal(sanitize_decimal_str(m_milk_tot.group(3)))
+            subtotals['milk_total_trays'] = Decimal(sanitize_tray_str(m_milk_tot.group(3)))
         else:
             warnings.append("Subtotal MILK TOTAL was not explicitly identified in OCR text.")
 
@@ -235,7 +276,7 @@ class AavinAbstractParser:
         if m_curd_tot:
             subtotals['curd_buttermilk_total_litres'] = Decimal(sanitize_decimal_str(m_curd_tot.group(1)))
             subtotals['curd_buttermilk_total_packets'] = sanitize_int(m_curd_tot.group(2))
-            subtotals['curd_buttermilk_total_trays'] = Decimal(sanitize_decimal_str(m_curd_tot.group(3)))
+            subtotals['curd_buttermilk_total_trays'] = Decimal(sanitize_tray_str(m_curd_tot.group(3)))
         else:
             warnings.append("Subtotal CURD & BUTTERMILK TOTAL was not explicitly identified in OCR text.")
 
@@ -247,7 +288,7 @@ class AavinAbstractParser:
         if m_grand_tot:
             subtotals['grand_total_litres'] = Decimal(sanitize_decimal_str(m_grand_tot.group(1)))
             subtotals['grand_total_packets'] = sanitize_int(m_grand_tot.group(2))
-            subtotals['grand_total_trays'] = Decimal(sanitize_decimal_str(m_grand_tot.group(3)))
+            subtotals['grand_total_trays'] = Decimal(sanitize_tray_str(m_grand_tot.group(3)))
         else:
             warnings.append("GRAND TOTAL row was not explicitly identified in OCR text.")
 
@@ -291,7 +332,7 @@ class AavinAbstractParser:
 
             parsed_pkt = sanitize_int(raw_pkt)
             parsed_ltr = Decimal(sanitize_decimal_str(raw_ltr))
-            parsed_tray = Decimal(sanitize_decimal_str(raw_tray))
+            parsed_tray = Decimal(sanitize_tray_str(raw_tray))
 
             # Conservative normalization check:
             # In tabular dot-matrix OCR, a trailing '1' or '|' from vertical column border
@@ -323,15 +364,15 @@ class AavinAbstractParser:
                         f"Line #{item_no} ({cleaned_pname}): packets({parsed_pkt}) * unit({nom_unit}L) = {calc_ltr}L, but extracted is {parsed_ltr}L."
                     )
 
-            # Tray check: if raw_tray has trailing 1 artifact (e.g. 2148.011 instead of 2148.001)
-            # We preserve extracted tray but sanitize decimals
+            # Tray check: if raw_tray has trailing border artifact '|' misread as '1' (e.g. 2148.011 instead of 2148.01)
+            # sanitize_tray_str strips the border symbol, preserving genuine 2-decimal tray count.
             items.append({
                 'item_no': item_no,
                 'product_name': cleaned_pname,
                 'category': category,
                 'quantity_litres': f"{parsed_ltr:.3f}",
                 'quantity_packets': parsed_pkt,
-                'quantity_trays': f"{parsed_tray:.3f}",
+                'quantity_trays': f"{parsed_tray:.2f}",
                 'row_type': 'PRODUCT',
                 'raw_tokens': {
                     'litres': raw_ltr,
@@ -508,7 +549,7 @@ class AavinAbstractParser:
             'category': 'MILK',
             'quantity_litres': f"{subtotals['milk_total_litres']:.3f}",
             'quantity_packets': subtotals['milk_total_packets'],
-            'quantity_trays': f"{subtotals['milk_total_trays']:.3f}",
+            'quantity_trays': f"{subtotals['milk_total_trays']:.2f}",
             'row_type': 'SUBTOTAL'
         })
 
@@ -519,7 +560,7 @@ class AavinAbstractParser:
             'category': 'CURD_BUTTERMILK',
             'quantity_litres': f"{subtotals['curd_buttermilk_total_litres']:.3f}",
             'quantity_packets': subtotals['curd_buttermilk_total_packets'],
-            'quantity_trays': f"{subtotals['curd_buttermilk_total_trays']:.3f}",
+            'quantity_trays': f"{subtotals['curd_buttermilk_total_trays']:.2f}",
             'row_type': 'SUBTOTAL'
         })
 
@@ -530,7 +571,7 @@ class AavinAbstractParser:
             'category': 'TOTAL',
             'quantity_litres': f"{subtotals['grand_total_litres']:.3f}",
             'quantity_packets': subtotals['grand_total_packets'],
-            'quantity_trays': f"{subtotals['grand_total_trays']:.3f}",
+            'quantity_trays': f"{subtotals['grand_total_trays']:.2f}",
             'row_type': 'GRAND_TOTAL'
         })
 
@@ -544,13 +585,13 @@ class AavinAbstractParser:
             'abstract_no': header['abstract_no'],
             'milk_total_litres': f"{subtotals['milk_total_litres']:.3f}",
             'milk_total_packets': subtotals['milk_total_packets'],
-            'milk_total_trays': f"{subtotals['milk_total_trays']:.3f}",
+            'milk_total_trays': f"{subtotals['milk_total_trays']:.2f}",
             'curd_buttermilk_total_litres': f"{subtotals['curd_buttermilk_total_litres']:.3f}",
             'curd_buttermilk_total_packets': subtotals['curd_buttermilk_total_packets'],
-            'curd_buttermilk_total_trays': f"{subtotals['curd_buttermilk_total_trays']:.3f}",
+            'curd_buttermilk_total_trays': f"{subtotals['curd_buttermilk_total_trays']:.2f}",
             'grand_total_litres': f"{subtotals['grand_total_litres']:.3f}",
             'grand_total_packets': subtotals['grand_total_packets'],
-            'grand_total_trays': f"{subtotals['grand_total_trays']:.3f}",
+            'grand_total_trays': f"{subtotals['grand_total_trays']:.2f}",
             'raw_ocr_text': raw_text,
             'validation_status': validation_status,
             'validation_warnings': all_warnings,

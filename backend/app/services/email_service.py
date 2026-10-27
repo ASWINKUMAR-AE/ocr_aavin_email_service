@@ -100,24 +100,24 @@ class AavinReportEmailService:
         text_lines.append("-" * 70)
 
         for p in milk_products:
-            text_lines.append(f"{p['item_no']:<4} {p['product_name']:<26} {Decimal(p['quantity_litres']):>13.3f} {p['quantity_packets']:>11} {Decimal(p['quantity_trays']):>12.3f}")
+            text_lines.append(f"{p['item_no']:<4} {p['product_name']:<26} {Decimal(p['quantity_litres']):>13.3f} {p['quantity_packets']:>11} {Decimal(p['quantity_trays']):>12.2f}")
 
         if milk_subtotal:
             text_lines.append("-" * 70)
-            text_lines.append(f"{'':<4} {'MILK TOTAL':<26} {Decimal(milk_subtotal['quantity_litres']):>13.3f} {milk_subtotal['quantity_packets']:>11} {Decimal(milk_subtotal['quantity_trays']):>12.3f}")
+            text_lines.append(f"{'':<4} {'MILK TOTAL':<26} {Decimal(milk_subtotal['quantity_litres']):>13.3f} {milk_subtotal['quantity_packets']:>11} {Decimal(milk_subtotal['quantity_trays']):>12.2f}")
             text_lines.append("-" * 70)
 
         for p in curd_products:
-            text_lines.append(f"{p['item_no']:<4} {p['product_name']:<26} {Decimal(p['quantity_litres']):>13.3f} {p['quantity_packets']:>11} {Decimal(p['quantity_trays']):>12.3f}")
+            text_lines.append(f"{p['item_no']:<4} {p['product_name']:<26} {Decimal(p['quantity_litres']):>13.3f} {p['quantity_packets']:>11} {Decimal(p['quantity_trays']):>12.2f}")
 
         if curd_subtotal:
             text_lines.append("-" * 70)
-            text_lines.append(f"{'':<4} {'CURD & BUTTERMILK TOTAL':<26} {Decimal(curd_subtotal['quantity_litres']):>13.3f} {curd_subtotal['quantity_packets']:>11} {Decimal(curd_subtotal['quantity_trays']):>12.3f}")
+            text_lines.append(f"{'':<4} {'CURD & BUTTERMILK TOTAL':<26} {Decimal(curd_subtotal['quantity_litres']):>13.3f} {curd_subtotal['quantity_packets']:>11} {Decimal(curd_subtotal['quantity_trays']):>12.2f}")
             text_lines.append("-" * 70)
 
         if grand_total:
             text_lines.append("=" * 70)
-            text_lines.append(f"{'':<4} {'GRAND TOTAL':<26} {Decimal(grand_total['quantity_litres']):>13.3f} {grand_total['quantity_packets']:>11} {Decimal(grand_total['quantity_trays']):>12.3f}")
+            text_lines.append(f"{'':<4} {'GRAND TOTAL':<26} {Decimal(grand_total['quantity_litres']):>13.3f} {grand_total['quantity_packets']:>11} {Decimal(grand_total['quantity_trays']):>12.2f}")
             text_lines.append("=" * 70)
 
         text_lines.extend([
@@ -154,7 +154,7 @@ class AavinReportEmailService:
             item_no_str = str(item['item_no']) if not is_subtotal and not is_grand_total else ""
             ltr_str = f"{Decimal(item['quantity_litres']):,.3f}"
             pkt_str = f"{int(item['quantity_packets']):,}"
-            tray_str = f"{Decimal(item['quantity_trays']):,.3f}"
+            tray_str = f"{Decimal(item['quantity_trays']):,.2f}"
 
             return f"""
             <tr style="background-color: {bg}; font-weight: {weight}; color: {color};">
