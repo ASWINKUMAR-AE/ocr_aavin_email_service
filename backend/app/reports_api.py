@@ -302,6 +302,27 @@ def get_report(report_id: str):
     report = reports_store.get_report(report_id)
     if not report:
         raise HTTPException(404, 'Report not found')
+    # If report was marked NEEDS_REVIEW, try re-parsing against original OCR text / document lines
+    if report.get('validation_status') == 'NEEDS_REVIEW':
+        raw_text = report.get('raw_ocr_text')
+        doc_id = report.get('document_id')
+        if doc_id:
+            doc = store.get(doc_id)
+            if doc and doc.get('lines'):
+                raw_text = " ".join((l.get('corrected_text') or l.get('raw_text') or '') for l in doc['lines'])
+        if raw_text:
+            try:
+                reparsed = AavinAbstractParser.parse_aavin_abstract(
+                    raw_text=raw_text,
+                    ocr_created_at=report.get('ocr_created_at'),
+                    document_id=doc_id
+                )
+                if reparsed and reparsed.get('validation_status') == 'VALIDATED':
+                    items = reparsed.pop('items')
+                    saved = reports_store.save_or_reconcile_report(reparsed, items, user='auto_reparse')
+                    return reports_store.get_report(saved['id'])
+            except Exception:
+                pass
     return report
 
 

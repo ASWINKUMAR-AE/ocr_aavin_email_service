@@ -15,6 +15,7 @@ if env_path.is_file():
             k, v = line.split('=', 1)
             k = k.strip()
             v = v.strip().strip("'\"")
+            os.environ.setdefault(k, v)
 DATA = Path(os.getenv('OCR_DATA_DIR', ROOT / 'data')).resolve()
 MODELS = Path(os.getenv('OCR_MODEL_DIR', ROOT / 'models')).resolve()
 MAX_UPLOAD = int(os.getenv('OCR_MAX_UPLOAD_MB', '25')) * 1024 * 1024
@@ -60,40 +61,53 @@ def reload_env():
                 k, v = line.split('=', 1)
                 os.environ[k.strip()] = v.strip().strip("'\"")
 
-    SMTP_HOST = os.getenv('SMTP_HOST', '').strip()
-    SMTP_PORT = int(os.getenv('SMTP_PORT', '587'))
-    SMTP_USER = os.getenv('SMTP_USER', '').strip()
-    SMTP_PASSWORD = os.getenv('SMTP_PASSWORD', '')
-    SMTP_FROM_EMAIL = os.getenv('SMTP_FROM_EMAIL', 'reports@aavin.local').strip()
-    SMTP_FROM_NAME = os.getenv('SMTP_FROM_NAME', 'Aavin OCR Reports').strip()
-    SMTP_USE_TLS = os.getenv('SMTP_USE_TLS', 'true').lower() in ('true', '1', 'yes')
-    SMTP_USE_SSL = os.getenv('SMTP_USE_SSL', 'false').lower() in ('true', '1', 'yes')
-
-    raw_to = os.getenv('REPORT_EMAIL_TO', '').strip()
-    REPORT_EMAIL_TO = [e.strip() for e in raw_to.split(',') if e.strip()] if raw_to else ['reports@aavin.local']
-
-    raw_prefs = os.getenv('REPORT_RECIPIENT_PREFERENCES', '').strip()
-    parsed_prefs = []
-    if raw_prefs:
+    if 'SMTP_HOST' in os.environ:
+        SMTP_HOST = os.environ['SMTP_HOST'].strip()
+    if 'SMTP_PORT' in os.environ:
         try:
-            items = json.loads(raw_prefs)
-            if isinstance(items, list):
-                for item in items:
-                    if isinstance(item, dict) and 'email' in item and item['email'].strip():
-                        parsed_prefs.append({
-                            'role': str(item.get('role', 'STAFF')).strip().upper(),
-                            'name': str(item.get('name', '')).strip(),
-                            'email': item['email'].strip(),
-                            'send_pdf': bool(item.get('send_pdf', True)),
-                            'send_excel': bool(item.get('send_excel', False)),
-                        })
-        except Exception:
-            parsed_prefs = []
+            SMTP_PORT = int(os.environ['SMTP_PORT'])
+        except ValueError:
+            pass
+    if 'SMTP_USER' in os.environ:
+        SMTP_USER = os.environ['SMTP_USER'].strip()
+    if 'SMTP_PASSWORD' in os.environ:
+        SMTP_PASSWORD = os.environ['SMTP_PASSWORD']
+    if 'SMTP_FROM_EMAIL' in os.environ:
+        SMTP_FROM_EMAIL = os.environ['SMTP_FROM_EMAIL'].strip()
+    if 'SMTP_FROM_NAME' in os.environ:
+        SMTP_FROM_NAME = os.environ['SMTP_FROM_NAME'].strip()
+    if 'SMTP_USE_TLS' in os.environ:
+        SMTP_USE_TLS = os.environ['SMTP_USE_TLS'].lower() in ('true', '1', 'yes')
+    if 'SMTP_USE_SSL' in os.environ:
+        SMTP_USE_SSL = os.environ['SMTP_USE_SSL'].lower() in ('true', '1', 'yes')
 
-    if parsed_prefs:
-        REPORT_RECIPIENT_PREFERENCES = parsed_prefs
-        REPORT_EMAIL_TO = [p['email'] for p in parsed_prefs]
-    else:
+    if 'REPORT_EMAIL_TO' in os.environ:
+        raw_to = os.environ['REPORT_EMAIL_TO'].strip()
+        REPORT_EMAIL_TO = [e.strip() for e in raw_to.split(',') if e.strip()] if raw_to else ['reports@aavin.local']
+
+    if 'REPORT_RECIPIENT_PREFERENCES' in os.environ:
+        raw_prefs = os.environ['REPORT_RECIPIENT_PREFERENCES'].strip()
+        parsed_prefs = []
+        if raw_prefs:
+            try:
+                items = json.loads(raw_prefs)
+                if isinstance(items, list):
+                    for item in items:
+                        if isinstance(item, dict) and 'email' in item and item['email'].strip():
+                            parsed_prefs.append({
+                                'role': str(item.get('role', 'STAFF')).strip().upper(),
+                                'name': str(item.get('name', '')).strip(),
+                                'email': item['email'].strip(),
+                                'send_pdf': bool(item.get('send_pdf', True)),
+                                'send_excel': bool(item.get('send_excel', False)),
+                            })
+            except Exception:
+                parsed_prefs = []
+
+        if parsed_prefs:
+            REPORT_RECIPIENT_PREFERENCES = parsed_prefs
+            REPORT_EMAIL_TO = [p['email'] for p in parsed_prefs]
+    elif not REPORT_RECIPIENT_PREFERENCES:
         # Default with GM, AGM, AA role structure
         default_roles = ['GM', 'AGM', 'AA']
         role_names = {
@@ -121,10 +135,14 @@ def reload_env():
             })
         REPORT_RECIPIENT_PREFERENCES = recs
 
-    REPORT_EMAIL_CC = [e.strip() for e in os.getenv('REPORT_EMAIL_CC', '').split(',') if e.strip()]
-    REPORT_EMAIL_BCC = [e.strip() for e in os.getenv('REPORT_EMAIL_BCC', '').split(',') if e.strip()]
-    REPORT_EMAIL_ENABLED = os.getenv('REPORT_EMAIL_ENABLED', 'false').lower() in ('true', '1', 'yes')
-    REPORT_TIMEZONE = os.getenv('REPORT_TIMEZONE', 'Asia/Kolkata').strip()
+    if 'REPORT_EMAIL_CC' in os.environ:
+        REPORT_EMAIL_CC = [e.strip() for e in os.environ['REPORT_EMAIL_CC'].split(',') if e.strip()]
+    if 'REPORT_EMAIL_BCC' in os.environ:
+        REPORT_EMAIL_BCC = [e.strip() for e in os.environ['REPORT_EMAIL_BCC'].split(',') if e.strip()]
+    if 'REPORT_EMAIL_ENABLED' in os.environ:
+        REPORT_EMAIL_ENABLED = os.environ['REPORT_EMAIL_ENABLED'].lower() in ('true', '1', 'yes')
+    if 'REPORT_TIMEZONE' in os.environ:
+        REPORT_TIMEZONE = os.environ['REPORT_TIMEZONE'].strip()
 
 
 reload_env()

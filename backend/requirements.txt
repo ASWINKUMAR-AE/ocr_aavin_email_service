@@ -14,3 +14,4 @@ paddleocr==3.3.2
 # installs unused document-parser/VLM utilities (SciPy, sklearn, tokenizers...).
 paddlex[ocr-core]==3.3.10
 paddlepaddle==3.2.2
+psycopg2-binary==2.9.10

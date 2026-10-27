@@ -10,9 +10,12 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
+import os
 from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app import config, reports_store, store
@@ -45,16 +48,40 @@ app = FastAPI(title='Bilingual OCR Studio', lifespan=lifespan)
 app.include_router(tables_router)
 app.include_router(reports_router)
 app.add_middleware(UploadBodyLimit)
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])
+
+# Dynamic host allowlist for production / cloud / LAN deployments
+raw_allowed_hosts = os.getenv('ALLOWED_HOSTS', '*').strip()
+allowed_hosts = [h.strip() for h in raw_allowed_hosts.split(',') if h.strip()] if raw_allowed_hosts else ['*']
+if '*' not in allowed_hosts:
+    for local_h in ('127.0.0.1', 'localhost', 'testserver'):
+        if local_h not in allowed_hosts:
+            allowed_hosts.append(local_h)
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+# Configurable CORS and origin security
+raw_cors = os.getenv('CORS_ORIGINS', os.getenv('TRUSTED_ORIGINS', '*')).strip()
+configured_origins = [o.strip() for o in raw_cors.split(',') if o.strip()] if raw_cors else ['*']
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=configured_origins,
+    allow_credentials=True if '*' not in configured_origins else False,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
+
+trusted_origin_set = set(configured_origins)
 
 
 @app.middleware('http')
 async def local_origin(request, call_next):
-    # Reject cross-site writes even when they use multipart/simple requests.
+    # Reject cross-site writes unless origin is trusted or wildcards allowed
     if request.method not in ('GET', 'HEAD', 'OPTIONS'):
         origin = request.headers.get('origin')
-        if origin and origin not in ('http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8000', 'http://localhost:8000'):
-            return Response('Untrusted origin', status_code=403)
+        if origin and '*' not in trusted_origin_set:
+            local_defaults = ('http://127.0.0.1:5173', 'http://localhost:5173', 'http://127.0.0.1:8000', 'http://localhost:8000', 'http://127.0.0.1', 'http://localhost')
+            if origin not in trusted_origin_set and origin not in local_defaults:
+                return Response('Untrusted origin', status_code=403)
     response = await call_next(request)
     response.headers['Cache-Control'] = 'no-store'
     return response
@@ -228,3 +255,26 @@ def export(identifier: str, format: str, metadata: bool = True):
     else:
         raise HTTPException(400, 'Unknown export format')
     return Response(content, media_type=mime, headers={'Content-Disposition': f'attachment; filename="ocr-{identifier}.{format}"', 'Cache-Control': 'no-store'})
+
+
+@app.get('/health', include_in_schema=False)
+def root_health():
+    """Root health check alias for standard monitoring and load balancers."""
+    return health()
+
+
+# Mount production frontend SPA build if available
+frontend_dist = Path(__file__).resolve().parents[2] / 'frontend' / 'dist'
+if (frontend_dist / 'assets').is_dir():
+    app.mount('/assets', StaticFiles(directory=str(frontend_dist / 'assets')), name='assets')
+
+if frontend_dist.is_dir() and (frontend_dist / 'index.html').is_file():
+    @app.get('/', include_in_schema=False)
+    @app.get('/{full_path:path}', include_in_schema=False)
+    async def serve_frontend(full_path: str = ''):
+        if full_path.startswith(('api/', 'docs', 'openapi.json', 'redoc')):
+            raise HTTPException(404, 'Endpoint not found')
+        target_file = frontend_dist / full_path
+        if full_path and target_file.is_file():
+            return FileResponse(target_file)
+        return FileResponse(frontend_dist / 'index.html')

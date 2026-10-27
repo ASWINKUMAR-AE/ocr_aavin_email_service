@@ -590,5 +590,46 @@ def test_admin_authentication_and_sender_settings():
     assert unauth_res.status_code == 401
 
 
+def test_parse_noisy_dot_matrix_ocr():
+    """Verify robust parsing of real-world noisy dot-matrix printout."""
+    raw_ocr = (
+        "GA13O1 THE MADURAI DISTRICT CO-OPERATIVE MILK PRODUCERS' UNION LTD., "
+        "SIVAGANGAI MAIN ROAD,MADURAI - 625 020 "
+        "DATE 21.10.2026 SHIFT: EVENING "
+        "ABSTRACT "
+        "INO. I TYPE OF PRODUCT QTY (LTR) QTY (PKT TRAY "
+        "I 1 ICOW MILK 500 ML 25776.5001 515531 2148.011 "
+        "2 ICM 200 ML 4763,6001 238181 476.181 "
+        "3 |AAVIN GOLD 500 MIL 12321.000| 246421 1026.181 "
+        "4 ITEA MATE PLUS-1000ML 5547.0001 55471 462.031 "
+        "5 ITEAMATE 500 ML 533.000( 1066| 44.101 "
+        "MILKTOTAL 48941.1001 106626| 4156.001 "
+        "6 ICURD 200 GM CUP 4.8001 241 1.001 "
+        "7 1CURD 500 GM 107.0001 2141 8.221 "
+        "8 ICURD 145 MIL 67.4551 4791 7.591 "
+        "9 |BUTTERMILK 140 ML 12.7401 911 1.311 "
+        "CURD & BUTTER MILK T O T A L 193.9951 8081 17.001 "
+        "GRAND TOTAL 49135.095 1074341 4173.001"
+    )
+
+    parsed = AavinAbstractParser.parse_aavin_abstract(raw_ocr)
+    assert parsed is not None
+    assert parsed['validation_status'] == 'VALIDATED'
+    assert len(parsed['validation_warnings']) == 0
+    assert parsed['milk_total_litres'] == '48941.100'
+    assert parsed['milk_total_packets'] == 106626
+    assert parsed['curd_buttermilk_total_litres'] == '193.995'
+    assert parsed['curd_buttermilk_total_packets'] == 808
+    assert parsed['grand_total_litres'] == '49135.095'
+    assert parsed['grand_total_packets'] == 107434
+
+    # Check that all 9 products + 3 subtotals = 12 items are present
+    assert len(parsed['items']) == 12
+    product_items = [i for i in parsed['items'] if i['row_type'] == 'PRODUCT']
+    assert len(product_items) == 9
+    assert [i['item_no'] for i in product_items] == list(range(1, 10))
+
+
+
 
 

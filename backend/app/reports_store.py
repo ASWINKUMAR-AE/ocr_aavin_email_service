@@ -9,14 +9,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from app.config import DATA
+from app.db import get_connection, initialize_all_tables, migrate_sqlite_if_needed
 
 
 @contextmanager
 def db_connection():
-    DATA.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DATA / 'studio.sqlite3', timeout=20) as db:
-        db.row_factory = sqlite3.Row
-        db.execute('PRAGMA foreign_keys = ON')
+    with get_connection(data_dir=DATA) as db:
         yield db
 
 
@@ -37,95 +35,8 @@ def verify_password(password: str, password_hash: str, salt: str) -> bool:
 def initialize_reports_tables():
     """Create schema for reports, report items, audit logs, and admin credentials."""
     with db_connection() as db:
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS reports (
-                id TEXT PRIMARY KEY,
-                document_id TEXT,
-                union_code TEXT NOT NULL,
-                organization_name TEXT NOT NULL,
-                address TEXT NOT NULL,
-                report_date TEXT NOT NULL,
-                shift TEXT NOT NULL,
-                abstract_no TEXT,
-                milk_total_litres TEXT NOT NULL,
-                milk_total_packets INTEGER NOT NULL,
-                milk_total_trays TEXT NOT NULL,
-                curd_buttermilk_total_litres TEXT NOT NULL,
-                curd_buttermilk_total_packets INTEGER NOT NULL,
-                curd_buttermilk_total_trays TEXT NOT NULL,
-                grand_total_litres TEXT NOT NULL,
-                grand_total_packets INTEGER NOT NULL,
-                grand_total_trays TEXT NOT NULL,
-                raw_ocr_text TEXT NOT NULL,
-                parsed_json TEXT NOT NULL,
-                validation_status TEXT NOT NULL,
-                validation_warnings TEXT NOT NULL,
-                ocr_created_at TEXT NOT NULL,
-                report_processed_at TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                email_status TEXT NOT NULL,
-                email_sent_at TEXT,
-                approved_by TEXT,
-                approved_at TEXT,
-                CONSTRAINT uq_report_business_key UNIQUE (union_code, report_date, shift)
-            )
-        ''')
-
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS report_items (
-                id TEXT PRIMARY KEY,
-                report_id TEXT NOT NULL REFERENCES reports(id) ON DELETE CASCADE,
-                item_no INTEGER NOT NULL,
-                product_name TEXT NOT NULL,
-                category TEXT NOT NULL,
-                quantity_litres TEXT NOT NULL,
-                quantity_packets INTEGER NOT NULL,
-                quantity_trays TEXT NOT NULL,
-                row_type TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-        ''')
-
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS report_audit_logs (
-                id TEXT PRIMARY KEY,
-                report_id TEXT NOT NULL,
-                action TEXT NOT NULL,
-                details TEXT NOT NULL,
-                timestamp TEXT NOT NULL
-            )
-        ''')
-
-        # Admin user accounts for protecting Mail Settings
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS admin_users (
-                id TEXT PRIMARY KEY,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                salt TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-        ''')
-
-        # Active admin sessions
-        db.execute('''
-            CREATE TABLE IF NOT EXISTS admin_sessions (
-                token TEXT PRIMARY KEY,
-                username TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL
-            )
-        ''')
-
-        db.execute('CREATE INDEX IF NOT EXISTS idx_reports_date ON reports (report_date)')
-        db.execute('CREATE INDEX IF NOT EXISTS idx_reports_shift ON reports (shift)')
-        db.execute('CREATE INDEX IF NOT EXISTS idx_reports_val_status ON reports (validation_status)')
-        db.execute('CREATE INDEX IF NOT EXISTS idx_reports_email_status ON reports (email_status)')
-        db.execute('CREATE INDEX IF NOT EXISTS idx_report_items_report_id ON report_items (report_id)')
-        db.execute('CREATE INDEX IF NOT EXISTS idx_report_audit_report_id ON report_audit_logs (report_id)')
-
+        initialize_all_tables(db=db)
+        migrate_sqlite_if_needed(db=db, data_dir=DATA)
     ensure_default_admin()
 
 
@@ -228,9 +139,11 @@ def save_or_reconcile_report(report_data: Dict[str, Any], items: List[Dict[str, 
             approved_by = existing['approved_by']
             approved_at = existing['approved_at']
 
-            # If existing validation was already approved or sent, preserve approval
-            validation_status = existing['validation_status']
-            if validation_status != 'VALIDATED':
+            if report_data.get('validation_status') == 'VALIDATED':
+                validation_status = 'VALIDATED'
+            elif existing['validation_status'] in ('VALIDATED', 'APPROVED'):
+                validation_status = existing['validation_status']
+            else:
                 validation_status = report_data.get('validation_status', 'NEEDS_REVIEW')
 
             db.execute('''

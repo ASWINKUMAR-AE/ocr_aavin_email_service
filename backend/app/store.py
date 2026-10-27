@@ -1,22 +1,21 @@
 import json
-import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from app.config import DATA
+from app.db import get_connection, initialize_all_tables, migrate_sqlite_if_needed
 
 
 @contextmanager
 def connection():
-    DATA.mkdir(parents=True, exist_ok=True)
-    with sqlite3.connect(DATA / 'studio.sqlite3', timeout=20) as db:
-        db.row_factory = sqlite3.Row
+    with get_connection(data_dir=DATA) as db:
         yield db
 
 
 def initialize():
     with connection() as db:
-        db.execute('CREATE TABLE IF NOT EXISTS documents (id TEXT PRIMARY KEY, payload TEXT NOT NULL)')
+        initialize_all_tables(db=db)
+        migrate_sqlite_if_needed(db=db, data_dir=DATA)
         for row in db.execute('SELECT id, payload FROM documents').fetchall():
             doc = json.loads(row['payload'])
             if doc['status'] in ('queued', 'processing'):

@@ -64,6 +64,7 @@ def test_blank_correction_and_formula_export(client):
 
 
 def test_bad_upload_and_cross_origin(client, monkeypatch):
+    monkeypatch.setattr(main, 'trusted_origin_set', {'http://localhost:5173'})
     assert client.post('/api/documents', files={'file':('bad.png',b'bad')}).status_code == 422
     assert client.post('/api/documents', files={'file':('bad.exe',b'bad')}).status_code == 415
     assert client.post('/api/documents', headers={'origin':'https://untrusted.example'}, files={'file':('bad.png',b'bad')}).status_code == 403

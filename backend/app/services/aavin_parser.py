@@ -9,12 +9,18 @@ def sanitize_decimal_str(val: Any) -> str:
     if val is None:
         return "0.000"
     s = str(val).strip().replace(' ', '')
+    # Strip any enclosing trailing/leading noise characters: |, I, l, (, ), /, -, etc.
+    s = re.sub(r'[|Il()/\-]+$', '', s)
+    s = re.sub(r'^[|Il()/\-]+', '', s)
     # If comma is followed by 3 or 4 digits and preceded by digits, treat as decimal point
     if re.search(r'\d+,\d{3,4}$', s):
         s = s.replace(',', '.')
     else:
         s = s.replace(',', '')
-    # Strip any trailing non-numeric except digits and dot
+    # If 4 decimals ending in 1 or I (dot-matrix column separator artifact), strip it
+    m4 = re.search(r'^(\d+\.\d{3})[1|I]$', s)
+    if m4:
+        s = m4.group(1)
     s = re.sub(r'[^\d.]', '', s)
     if not s or s == '.':
         return "0.000"
@@ -32,6 +38,8 @@ def sanitize_int(val: Any) -> int:
     if isinstance(val, int):
         return val
     s = str(val).strip().replace(',', '').replace(' ', '')
+    s = re.sub(r'[|Il()/\-]+$', '', s)
+    s = re.sub(r'^[|Il()/\-]+', '', s)
     s = re.sub(r'[^\d]', '', s)
     if not s:
         return 0
@@ -44,21 +52,43 @@ def sanitize_int(val: Any) -> int:
 def extract_unit_size_litres(product_name: str) -> Optional[Decimal]:
     """Determine nominal package unit size in litres from product description."""
     upper = product_name.upper()
-    if '500 ML' in upper or '500ML' in upper:
+    # Normalize OCR digit O -> 0 in numbers (e.g. 50O -> 500, 20O -> 200)
+    upper = re.sub(r'(\d+)O', r'\g<1>0', upper)
+    # Normalize MIL, M1L, MI to ML
+    upper = re.sub(r'\bMIL\b', 'ML', upper)
+    upper = re.sub(r'(\d+)\s*MIL\b', r'\1 ML', upper)
+    upper = re.sub(r'(\d+)\s*M1L\b', r'\1 ML', upper)
+
+    if '500 ML' in upper or '500ML' in upper or '500 GM' in upper or '500GM' in upper:
         return Decimal('0.5')
-    if '200 ML' in upper or '200ML' in upper:
+    if '200 ML' in upper or '200ML' in upper or '200 GM' in upper or '200GM' in upper:
         return Decimal('0.2')
-    if '1000 ML' in upper or '1000ML' in upper or '1 LTR' in upper:
+    if '1000 ML' in upper or '1000ML' in upper or '1 LTR' in upper or '1LTR' in upper:
         return Decimal('1.0')
-    if '500 GM' in upper or '500GM' in upper:
-        return Decimal('0.5')
-    if '200 GM' in upper or '200GM' in upper:
-        return Decimal('0.2')
-    if '145 ML' in upper or '145ML' in upper:
+    if '145 ML' in upper or '145ML' in upper or '145 GM' in upper or '145GM' in upper:
         return Decimal('0.145')
-    if '140 ML' in upper or '140ML' in upper:
+    if '140 ML' in upper or '140ML' in upper or '140 GM' in upper or '140GM' in upper:
         return Decimal('0.140')
     return None
+
+
+def clean_product_name(raw_name: str) -> str:
+    """Clean OCR artifacts from product names."""
+    p = raw_name.strip()
+    # Remove header remnants if present before product name (e.g. QTY PKT TRAY)
+    p = re.sub(r'^.*(?:TRAY|PKT|LTR|PRODUCT)\b[^\w\d]*', '', p, flags=re.IGNORECASE)
+    # Remove leading row index or delimiter tokens (e.g. "1 ", "| ", "I ", "– ")
+    p = re.sub(r'^[0-9]\s*', '', p)
+    p = re.sub(r'^[|I1l/–\-\s]+', '', p)
+    # If starts with single I or | before word like ICOW -> COW, ICM -> CM, ICURD -> CURD, IEM -> CM
+    p = re.sub(r'^[I|1l](?=[A-Z]{2,})', '', p)
+    # Normalize common OCR character confusions in size and units
+    p = re.sub(r'\bMIL\b', 'ML', p)
+    p = re.sub(r'(\d+)\s*MIL\b', r'\1 ML', p)
+    p = re.sub(r'(\d+)O\b', r'\g<1>0', p)
+    # Remove trailing column separator artifacts
+    p = re.sub(r'[\s|I/–\-]+$', '', p)
+    return p.strip()
 
 
 class AavinAbstractParser:
@@ -185,9 +215,9 @@ class AavinAbstractParser:
         cleaned_text = re.sub(r'\s+', ' ', cleaned_text)
 
         # 1. Look for subtotals and grand total
-        # Milk Total
+        # Milk Total (handles MILK TOTAL, MILKTOTAL, MILK T O T A L)
         m_milk_tot = re.search(
-            r'MILK\s+TOTAL\s+([0-9.,|I]+)\s+([0-9.,|I]+)\s+([0-9.,|I]+)',
+            r'MILK\s*(?:T\s*O\s*T\s*A\s*L|TOTAL)\s*(?:[|Il/–\-](?!\d)\s*)?([0-9.,|I(\-]+)\s+(?:[|Il/–\-]\s+)?([0-9.,|I(\-]+)\s+(?:[|Il/–\-]\s+)?([0-9.,|I(\-]+)',
             cleaned_text, re.IGNORECASE
         )
         if m_milk_tot:
@@ -197,9 +227,9 @@ class AavinAbstractParser:
         else:
             warnings.append("Subtotal MILK TOTAL was not explicitly identified in OCR text.")
 
-        # Curd & Buttermilk Total
+        # Curd & Buttermilk Total (handles CURD & BUTTERMILK TOTAL, BUTTER MILK, RMILK, T O T A L)
         m_curd_tot = re.search(
-            r'CURD\s*&\s*BUTTERMILK\s+TOTAL\s+([0-9.,|I]+)\s+([0-9.,|I]+)\s+([0-9.,|I]+)',
+            r'CURD\s*(?:&|AND|\/)?\s*BUTTER\s*R?MILK\s*(?:T\s*O\s*T\s*A\s*L|TOTAL)\s*(?:[|Il/–\-](?!\d)\s*)?([0-9.,|I(\-]+)\s+(?:[|Il/–\-]\s+)?([0-9.,|I(\-]+)\s+(?:[|Il/–\-]\s+)?([0-9.,|I(\-]+)',
             cleaned_text, re.IGNORECASE
         )
         if m_curd_tot:
@@ -209,9 +239,9 @@ class AavinAbstractParser:
         else:
             warnings.append("Subtotal CURD & BUTTERMILK TOTAL was not explicitly identified in OCR text.")
 
-        # Grand Total
+        # Grand Total (handles GRAND TOTAL, GRAND T O T A L, GRAND I 0 T A L)
         m_grand_tot = re.search(
-            r'GRAND\s+TOTAL\s+([0-9.,|I]+)\s+([0-9.,|I]+)\s+([0-9.,|I]+)',
+            r'GRAND\s*(?:[IT1l|]\s*[0Oo]\s*[TI1l|]\s*[A@]\s*[L1l|]|TOTAL|T\s*O\s*T\s*A\s*L)\s*(?:[|Il/–\-](?!\d)\s*)?([0-9.,|I(\-]+)\s+(?:[|Il/–\-]\s+)?([0-9.,|I(\-]+)\s+(?:[|Il/–\-]\s+)?([0-9.,|I(\-]+)',
             cleaned_text, re.IGNORECASE
         )
         if m_grand_tot:
@@ -222,34 +252,42 @@ class AavinAbstractParser:
             warnings.append("GRAND TOTAL row was not explicitly identified in OCR text.")
 
         # 2. Extract numbered product rows
-        # Pattern: item_no (1-99), Product Name (text), Qty Ltr, Qty Pkt, Tray
-        # We search for lines starting with digit followed by product text
+        # Pattern: optional noise, item_no (1-99), optional noise, Product Name, 3 numeric values
         item_pattern = re.compile(
-            r'(?:(?<=\s)|^)(\d{1,2})\s+([A-Za-z0-9\s\-+]+?)\s+([0-9.,|I]+)\s+([0-9.,|I]+)\s+([0-9.,|I]+)(?=\s+(?:\d{1,2}\s+[A-Za-z]|MILK|CURD|GRAND|\Z))',
+            r'(?:^|\s)(?:[I1l|–\-]\s+)*([1-9]|1[0-9])\s*([I1l|/–\-])?\s+([A-Za-z0-9\s\-+|/().]+?)\s+([0-9.,|I(\-]+)\s+(?:[I1l|/–\-]\s+)?([0-9.,|I(\-]+)\s+(?:[I1l|/–\-]\s+)?([0-9.,|I(\-]+)(?=\s+(?:(?:[I1l|–\-]\s+)*\d{1,2}\b|MILK|CURD|GRAND|\Z))',
             re.IGNORECASE
         )
 
         matches = list(item_pattern.finditer(cleaned_text))
+        seen_items = set()
         for m in matches:
             item_no = int(m.group(1))
-            raw_pname = m.group(2).strip()
-            raw_ltr = m.group(3).strip()
-            raw_pkt = m.group(4).strip()
-            raw_tray = m.group(5).strip()
-
-            # Ignore if product name is or starts with header terms
-            if any(term in raw_pname.upper() for term in ('TYPE OF PRODUCT', 'ABSTRACT NO')):
+            if item_no in seen_items:
                 continue
 
+            raw_pname = m.group(3).strip()
+            raw_ltr = m.group(4).strip()
+            raw_pkt = m.group(5).strip()
+            raw_tray = m.group(6).strip()
+
+            cleaned_pname = clean_product_name(raw_pname)
+            # Ignore if product name is or starts with header terms or total terms
+            if any(term in cleaned_pname.upper() for term in ('TYPE OF PRODUCT', 'ABSTRACT NO', 'GRAND TOTAL', 'MILK TOTAL')):
+                continue
+            if not cleaned_pname:
+                continue
+
+            seen_items.add(item_no)
+
             # Determine category: Curd & Buttermilk vs Milk
-            upper_name = raw_pname.upper()
+            upper_name = cleaned_pname.upper()
             if 'CURD' in upper_name or 'BUTTERMILK' in upper_name:
                 category = 'CURD_BUTTERMILK'
             else:
                 category = 'MILK'
 
             # Parse numeric values conservatively
-            nom_unit = extract_unit_size_litres(raw_pname)
+            nom_unit = extract_unit_size_litres(cleaned_pname)
 
             parsed_pkt = sanitize_int(raw_pkt)
             parsed_ltr = Decimal(sanitize_decimal_str(raw_ltr))
@@ -263,7 +301,7 @@ class AavinAbstractParser:
                 # Check if raw_pkt has trailing 1 artifact:
                 if str(parsed_pkt).endswith('1') and parsed_pkt > 10:
                     cand_pkt = int(str(parsed_pkt)[:-1])
-                    if cand_pkt * nom_unit == (parsed_ltr - Decimal('0.001')) or cand_pkt * nom_unit == (parsed_ltr - Decimal('0.0001')) or cand_pkt * nom_unit == Decimal(f"{parsed_ltr:.2f}"):
+                    if abs((cand_pkt * nom_unit) - parsed_ltr) <= Decimal('2.05') or cand_pkt * nom_unit == parsed_ltr:
                         parsed_pkt = cand_pkt
                         parsed_ltr = cand_pkt * nom_unit
                     elif cand_pkt * nom_unit == Decimal(f"{cand_pkt * nom_unit:.3f}") and abs((cand_pkt * nom_unit) - parsed_ltr) < Decimal('1.0'):
@@ -271,7 +309,7 @@ class AavinAbstractParser:
                         parsed_ltr = cand_pkt * nom_unit
 
                 # Check if litres string had comma or trailing 1
-                if raw_ltr.endswith('1') and len(raw_ltr) > 5 and '.' in sanitize_decimal_str(raw_ltr):
+                if raw_ltr.endswith(('1', 'I')) and len(raw_ltr) > 5 and '.' in sanitize_decimal_str(raw_ltr):
                     # Check if removing trailing 1 matches pkt * nom_unit
                     cand_ltr_str = raw_ltr[:-1]
                     cand_ltr = Decimal(sanitize_decimal_str(cand_ltr_str))
@@ -282,14 +320,14 @@ class AavinAbstractParser:
                 calc_ltr = parsed_pkt * nom_unit
                 if abs(calc_ltr - parsed_ltr) > Decimal('0.05'):
                     warnings.append(
-                        f"Line #{item_no} ({raw_pname}): packets({parsed_pkt}) * unit({nom_unit}L) = {calc_ltr}L, but extracted is {parsed_ltr}L."
+                        f"Line #{item_no} ({cleaned_pname}): packets({parsed_pkt}) * unit({nom_unit}L) = {calc_ltr}L, but extracted is {parsed_ltr}L."
                     )
 
             # Tray check: if raw_tray has trailing 1 artifact (e.g. 2148.011 instead of 2148.001)
             # We preserve extracted tray but sanitize decimals
             items.append({
                 'item_no': item_no,
-                'product_name': raw_pname,
+                'product_name': cleaned_pname,
                 'category': category,
                 'quantity_litres': f"{parsed_ltr:.3f}",
                 'quantity_packets': parsed_pkt,
@@ -336,6 +374,21 @@ class AavinAbstractParser:
         # Check Milk Totals
         ext_milk_ltr = subtotals['milk_total_litres']
         ext_milk_pkt = subtotals['milk_total_packets']
+
+        if ext_milk_pkt > 0:
+            if str(ext_milk_pkt).endswith('1') and ext_milk_pkt != calc_milk_pkt:
+                cand_pkt = int(str(ext_milk_pkt)[:-1])
+                if cand_pkt == calc_milk_pkt:
+                    ext_milk_pkt = cand_pkt
+                    subtotals['milk_total_packets'] = cand_pkt
+
+            if calc_milk_pkt != ext_milk_pkt:
+                warnings.append(
+                    f"Milk Packets mismatch: sum of items is {calc_milk_pkt}, but extracted subtotal is {ext_milk_pkt}."
+                )
+        else:
+            subtotals['milk_total_packets'] = calc_milk_pkt
+
         if ext_milk_ltr > Decimal('0.000'):
             if abs(calc_milk_ltr - ext_milk_ltr) > Decimal('0.005'):
                 warnings.append(
@@ -344,17 +397,24 @@ class AavinAbstractParser:
         else:
             subtotals['milk_total_litres'] = calc_milk_ltr
 
-        if ext_milk_pkt > 0:
-            if calc_milk_pkt != ext_milk_pkt:
-                warnings.append(
-                    f"Milk Packets mismatch: sum of items is {calc_milk_pkt}, but extracted subtotal is {ext_milk_pkt}."
-                )
-        else:
-            subtotals['milk_total_packets'] = calc_milk_pkt
-
         # Check Curd & Buttermilk Totals
         ext_curd_ltr = subtotals['curd_buttermilk_total_litres']
         ext_curd_pkt = subtotals['curd_buttermilk_total_packets']
+
+        if ext_curd_pkt > 0:
+            if str(ext_curd_pkt).endswith('1') and ext_curd_pkt != calc_curd_pkt:
+                cand_pkt = int(str(ext_curd_pkt)[:-1])
+                if cand_pkt == calc_curd_pkt:
+                    ext_curd_pkt = cand_pkt
+                    subtotals['curd_buttermilk_total_packets'] = cand_pkt
+
+            if calc_curd_pkt != ext_curd_pkt:
+                warnings.append(
+                    f"Curd/Buttermilk Packets mismatch: sum of items is {calc_curd_pkt}, but extracted subtotal is {ext_curd_pkt}."
+                )
+        else:
+            subtotals['curd_buttermilk_total_packets'] = calc_curd_pkt
+
         if ext_curd_ltr > Decimal('0.000'):
             if abs(calc_curd_ltr - ext_curd_ltr) > Decimal('0.005'):
                 warnings.append(
@@ -363,20 +423,26 @@ class AavinAbstractParser:
         else:
             subtotals['curd_buttermilk_total_litres'] = calc_curd_ltr
 
-        if ext_curd_pkt > 0:
-            if calc_curd_pkt != ext_curd_pkt:
-                warnings.append(
-                    f"Curd/Buttermilk Packets mismatch: sum of items is {calc_curd_pkt}, but extracted subtotal is {ext_curd_pkt}."
-                )
-        else:
-            subtotals['curd_buttermilk_total_packets'] = calc_curd_pkt
-
         # Check Grand Totals
         calc_grand_ltr = calc_milk_ltr + calc_curd_ltr
         calc_grand_pkt = calc_milk_pkt + calc_curd_pkt
 
         ext_grand_ltr = subtotals['grand_total_litres']
         ext_grand_pkt = subtotals['grand_total_packets']
+
+        if ext_grand_pkt > 0:
+            if str(ext_grand_pkt).endswith('1') and ext_grand_pkt != calc_grand_pkt:
+                cand_pkt = int(str(ext_grand_pkt)[:-1])
+                if cand_pkt == calc_grand_pkt:
+                    ext_grand_pkt = cand_pkt
+                    subtotals['grand_total_packets'] = cand_pkt
+
+            if calc_grand_pkt != ext_grand_pkt:
+                warnings.append(
+                    f"Grand Total Packets mismatch: calculated {calc_grand_pkt}, but extracted grand total is {ext_grand_pkt}."
+                )
+        else:
+            subtotals['grand_total_packets'] = calc_grand_pkt
 
         if ext_grand_ltr > Decimal('0.000'):
             if abs(calc_grand_ltr - ext_grand_ltr) > Decimal('0.005'):
@@ -385,14 +451,6 @@ class AavinAbstractParser:
                 )
         else:
             subtotals['grand_total_litres'] = calc_grand_ltr
-
-        if ext_grand_pkt > 0:
-            if calc_grand_pkt != ext_grand_pkt:
-                warnings.append(
-                    f"Grand Total Packets mismatch: calculated {calc_grand_pkt}, but extracted grand total is {ext_grand_pkt}."
-                )
-        else:
-            subtotals['grand_total_packets'] = calc_grand_pkt
 
         is_valid = (len(warnings) == 0)
         return is_valid, warnings
